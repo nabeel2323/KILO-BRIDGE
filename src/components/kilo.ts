@@ -88,7 +88,8 @@ export class KiloCliAdapter {
     if (res.code !== 0) {
       return failResult(`kilo run --help failed: ${res.stderr.trim()}`, "KILO_HELP_FAILED");
     }
-    this.helpText = res.stdout;
+    // Kilo prints its help banner to stderr; capture both streams.
+    this.helpText = res.stdout + "\n" + res.stderr;
     return okResult(this.helpText);
   }
 

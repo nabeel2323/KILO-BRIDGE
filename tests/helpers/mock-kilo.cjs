@@ -26,7 +26,8 @@ if (cmd === "--version") {
 }
 
 if (cmd === "run" && argv.includes("--help")) {
-  out(fixtures.help || "Options:\n  --auto\n  --format\n  --dir\n  --title\n  --model\n  --agent\n");
+  // Real Kilo prints help to stderr; mirror that behavior.
+  process.stderr.write((fixtures.help || "Options:\n  --auto\n  --format\n  --dir\n  --title\n  --model\n  --agent\n") + "\n");
   process.exit(0);
 }
 
