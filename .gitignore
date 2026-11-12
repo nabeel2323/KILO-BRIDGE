@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dist-test/
+data/
+logs/
+reports/
+.scratch/
+*.log
+bridge.config.json
