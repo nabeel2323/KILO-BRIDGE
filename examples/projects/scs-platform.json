@@ -1,0 +1,23 @@
+{
+  "id": "scs-platform",
+  "name": "Smart Commerce & Supply Platform",
+  "repository": "nabeel2323/scs-platform",
+  "localPath": "C:\\TAIF\\scs-platform",
+  "baseBranch": "develop",
+  "releaseBranch": "main",
+  "worktreeRoot": "C:\\TAIF\\_kilo-worktrees\\scs-platform",
+  "branchPrefix": "ai/kilo",
+  "allowedAuthors": ["nabeel2323"],
+  "runtime": {
+    "nodeVersion": "22",
+    "packageManager": "pnpm",
+    "packageManagerVersion": "9.15.9"
+  },
+  "projectType": "node",
+  "verificationCommands": ["pnpm lint", "pnpm typecheck", "pnpm test:unit", "pnpm build"],
+  "advisoryCommands": ["pnpm format:check"],
+  "conditionalVerification": ["pnpm --filter @scs/api test:coverage"],
+  "taskTimeoutMs": 21600000,
+  "pollIntervalMs": 30000,
+  "publishingEnabled": false
+}

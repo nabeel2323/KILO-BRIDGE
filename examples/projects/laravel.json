@@ -1,0 +1,22 @@
+{
+  "id": "my-laravel-app",
+  "name": "My Laravel Application",
+  "repository": "your-org/your-laravel-repo",
+  "localPath": "C:\\projects\\my-laravel-app",
+  "baseBranch": "develop",
+  "releaseBranch": "main",
+  "worktreeRoot": "C:\\TAIF\\_kilo-worktrees\\my-laravel-app",
+  "branchPrefix": "ai/kilo",
+  "allowedAuthors": ["your-github-username"],
+  "runtime": {
+    "phpVersion": "8.3",
+    "packageManager": "composer"
+  },
+  "projectType": "laravel",
+  "verificationCommands": ["php artisan test"],
+  "advisoryCommands": ["vendor/bin/pint --test"],
+  "conditionalVerification": [],
+  "taskTimeoutMs": 21600000,
+  "pollIntervalMs": 30000,
+  "publishingEnabled": false
+}

@@ -45,6 +45,8 @@ export class ProjectRegistry {
     if (!validated.success) {
       return failResult(`invalid project config: ${validated.error.message}`, "INVALID_PROJECT");
     }
+    const structural = validateProjectStructure(validated.data);
+    if (!structural.ok) return structural;
     if (this.deps.getProject(config.id)) {
       return failResult(`project ${config.id} already registered`, "PROJECT_EXISTS");
     }
@@ -70,6 +72,8 @@ export class ProjectRegistry {
     if (!validated.success) {
       return failResult(`invalid project config: ${validated.error.message}`, "INVALID_PROJECT");
     }
+    const structural = validateProjectStructure(validated.data);
+    if (!structural.ok) return structural;
     return okResult(validated.data);
   }
 
@@ -108,6 +112,7 @@ export class ProjectRegistry {
           projectType: "node",
           runtime: { nodeVersion: "22", packageManager: "pnpm", packageManagerVersion: "9.15.9" },
           verificationCommands: ["pnpm lint", "pnpm typecheck", "pnpm test:unit", "pnpm build"],
+          advisoryCommands: ["pnpm format:check"],
           branchPrefix: "ai/kilo",
         };
       case "laravel":
@@ -115,7 +120,9 @@ export class ProjectRegistry {
           ...base,
           projectType: "laravel",
           runtime: { packageManager: "composer" },
-          verificationCommands: ["composer install", "php artisan test"],
+          // No automatic package installation (spec §3): dependencies must be
+          // provisioned by the user before enabling the worker.
+          verificationCommands: ["php artisan test"],
           branchPrefix: "ai/kilo",
         };
       case "django":
@@ -131,6 +138,8 @@ export class ProjectRegistry {
           ...base,
           projectType: "odoo",
           runtime: { packageManager: "pip" },
+          // Odoo verification is deployment-specific: require explicit user
+          // configuration rather than guessing (spec §14).
           verificationCommands: [],
           branchPrefix: "ai/kilo",
         };
@@ -184,6 +193,40 @@ export class ProjectRegistry {
 
   // Runtime configuration summary for a project.
   runtimeConfig(config: ProjectConfig): Record<string, unknown> {
+    return runtimeSummary(config);
+  }
+}
+
+// Structural validation beyond zod shape checks: absolute paths, worktree
+// isolation from the main checkout, repository format, authorized authors.
+export function validateProjectStructure(config: ProjectConfig): BridgeResult<ProjectConfig> {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(config.repository)) {
+    return failResult(`repository must be owner/name: ${config.repository}`, "INVALID_REPOSITORY");
+  }
+  if (!path.isAbsolute(config.localPath)) {
+    return failResult(`localPath must be an absolute path: ${config.localPath}`, "INVALID_PATH");
+  }
+  if (!path.isAbsolute(config.worktreeRoot)) {
+    return failResult(`worktreeRoot must be an absolute path: ${config.worktreeRoot}`, "INVALID_PATH");
+  }
+  const local = path.resolve(config.localPath).toLowerCase();
+  const worktrees = path.resolve(config.worktreeRoot).toLowerCase();
+  if (worktrees === local || worktrees.startsWith(local + path.sep)) {
+    return failResult("worktreeRoot must not be inside the project localPath (isolation)", "WORKTREE_NOT_ISOLATED");
+  }
+  if (local === worktrees || local.startsWith(worktrees + path.sep)) {
+    return failResult("localPath must not be inside the worktreeRoot (isolation)", "WORKTREE_NOT_ISOLATED");
+  }
+  if (config.allowedAuthors.length === 0) {
+    return failResult("allowedAuthors must not be empty", "INVALID_AUTHORS");
+  }
+  if (!config.baseBranch.trim()) {
+    return failResult("baseBranch must not be empty", "INVALID_BRANCH");
+  }
+  return okResult(config);
+}
+
+function runtimeSummary(config: ProjectConfig): Record<string, unknown> {
     return {
       id: config.id,
       repository: config.repository,
@@ -204,5 +247,4 @@ export class ProjectRegistry {
       publishingEnabled: config.publishingEnabled,
       state: config.state,
     };
-  }
 }

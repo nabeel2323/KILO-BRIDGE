@@ -1,0 +1,22 @@
+{
+  "id": "my-odoo-module",
+  "name": "My Odoo Module",
+  "repository": "your-org/your-odoo-repo",
+  "localPath": "C:\\projects\\my-odoo-module",
+  "baseBranch": "develop",
+  "releaseBranch": "main",
+  "worktreeRoot": "C:\\TAIF\\_kilo-worktrees\\my-odoo-module",
+  "branchPrefix": "ai/kilo",
+  "allowedAuthors": ["your-github-username"],
+  "runtime": {
+    "pythonVersion": "3.11",
+    "packageManager": "pip"
+  },
+  "projectType": "odoo",
+  "verificationCommands": [],
+  "advisoryCommands": [],
+  "conditionalVerification": [],
+  "taskTimeoutMs": 21600000,
+  "pollIntervalMs": 30000,
+  "publishingEnabled": false
+}

@@ -1,0 +1,22 @@
+{
+  "id": "my-django-app",
+  "name": "My Django Application",
+  "repository": "your-org/your-django-repo",
+  "localPath": "C:\\projects\\my-django-app",
+  "baseBranch": "develop",
+  "releaseBranch": "main",
+  "worktreeRoot": "C:\\TAIF\\_kilo-worktrees\\my-django-app",
+  "branchPrefix": "ai/kilo",
+  "allowedAuthors": ["your-github-username"],
+  "runtime": {
+    "pythonVersion": "3.12",
+    "packageManager": "pip"
+  },
+  "projectType": "django",
+  "verificationCommands": ["python manage.py test"],
+  "advisoryCommands": ["python -m flake8"],
+  "conditionalVerification": [],
+  "taskTimeoutMs": 21600000,
+  "pollIntervalMs": 30000,
+  "publishingEnabled": false
+}

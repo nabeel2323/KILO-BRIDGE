@@ -1,0 +1,19 @@
+{
+  "id": "my-flutter-app",
+  "name": "My Flutter Application",
+  "repository": "your-org/your-flutter-repo",
+  "localPath": "C:\\projects\\my-flutter-app",
+  "baseBranch": "develop",
+  "releaseBranch": "main",
+  "worktreeRoot": "C:\\TAIF\\_kilo-worktrees\\my-flutter-app",
+  "branchPrefix": "ai/kilo",
+  "allowedAuthors": ["your-github-username"],
+  "runtime": {},
+  "projectType": "flutter",
+  "verificationCommands": ["flutter analyze", "flutter test"],
+  "advisoryCommands": ["dart format --output=none --set-exit-if-changed ."],
+  "conditionalVerification": [],
+  "taskTimeoutMs": 21600000,
+  "pollIntervalMs": 30000,
+  "publishingEnabled": false
+}

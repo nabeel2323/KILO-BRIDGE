@@ -1,0 +1,23 @@
+{
+  "id": "my-node-app",
+  "name": "My Node.js Application",
+  "repository": "your-org/your-node-repo",
+  "localPath": "C:\\projects\\my-node-app",
+  "baseBranch": "develop",
+  "releaseBranch": "main",
+  "worktreeRoot": "C:\\TAIF\\_kilo-worktrees\\my-node-app",
+  "branchPrefix": "ai/kilo",
+  "allowedAuthors": ["your-github-username"],
+  "runtime": {
+    "nodeVersion": "22",
+    "packageManager": "pnpm",
+    "packageManagerVersion": "9.15.9"
+  },
+  "projectType": "node",
+  "verificationCommands": ["pnpm lint", "pnpm typecheck", "pnpm test:unit", "pnpm build"],
+  "advisoryCommands": ["pnpm format:check"],
+  "conditionalVerification": [],
+  "taskTimeoutMs": 21600000,
+  "pollIntervalMs": 30000,
+  "publishingEnabled": false
+}
