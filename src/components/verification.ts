@@ -1,15 +1,10 @@
 "use strict";
 
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
-import type {
-  BridgeResult,
-  okResult,
-  failResult,
-  VerificationRecord,
-} from "../types";
+import crypto from "node:crypto";
+import type { VerificationRecord, ProjectConfig } from "../types";
+import { runProcess } from "./process";
 
 export interface VerificationCommand {
   name: string;
@@ -42,17 +37,59 @@ export interface VerificationEngineOptions {
   worktreePath: string;
   resultsDir: string;
   cwd?: string;
+  commandTimeoutMs?: number;
+}
+
+export const DEFAULT_VERIFICATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes per command
+
+// Tokenize a configured command string into argv (whitespace split, double
+// quotes honored). Only trusted project configuration is tokenized — never
+// issue/comment content (spec §5: no shell interpretation of GitHub content).
+export function tokenizeCommand(cmd: string): string[] {
+  const tokens: string[] = [];
+  const re = /"([^"]*)"|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(cmd)) !== null) {
+    tokens.push(m[1] ?? m[2]);
+  }
+  return tokens;
 }
 
 export class VerificationEngine {
   private readonly worktreePath: string;
   private readonly resultsDir: string;
   private readonly cwd: string;
+  private readonly commandTimeoutMs: number;
 
   constructor(opts: VerificationEngineOptions) {
     this.worktreePath = opts.worktreePath;
     this.resultsDir = opts.resultsDir;
     this.cwd = opts.cwd ?? process.cwd();
+    this.commandTimeoutMs = opts.commandTimeoutMs ?? DEFAULT_VERIFICATION_TIMEOUT_MS;
+  }
+
+  // Build the verification suite from explicit project configuration.
+  // required = verificationCommands, advisory = advisoryCommands,
+  // conditional = conditionalVerification (runs only when relevant files change).
+  static commandsFromProject(config: ProjectConfig, worktreePath: string): VerificationCommand[] {
+    const out: VerificationCommand[] = [];
+    const push = (raw: string, kind: "required" | "advisory" | "conditional") => {
+      const tokens = tokenizeCommand(raw);
+      if (tokens.length === 0) return;
+      out.push({
+        name: raw,
+        command: tokens[0],
+        args: tokens.slice(1),
+        required: kind === "required",
+        conditional: kind === "conditional",
+        conditionFiles: kind === "conditional" ? ["apps/api/**", "packages/**"] : undefined,
+        cwd: worktreePath,
+      });
+    };
+    for (const c of config.verificationCommands ?? []) push(c, "required");
+    for (const c of config.advisoryCommands ?? []) push(c, "advisory");
+    for (const c of config.conditionalVerification ?? []) push(c, "conditional");
+    return out;
   }
 
   // Build the default SCS Platform verification profile.
@@ -86,12 +123,14 @@ export class VerificationEngine {
 
   private matchesGlob(file: string, pattern: string): boolean {
     // Simple glob support: ** matches any depth, * matches within a segment.
+    // ** is placeholder-protected so the single-* pass cannot corrupt it.
     const regex = new RegExp(
       "^" +
         pattern
           .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-          .replace(/\*\*/g, ".*")
-          .replace(/\*/g, "[^/]*") +
+          .replace(/\*\*/g, "\u0000")
+          .replace(/\*/g, "[^/]*")
+          .replace(/\u0000/g, ".*") +
         "$"
     );
     return regex.test(file);
@@ -124,14 +163,15 @@ export class VerificationEngine {
       };
     }
 
-    try {
-      const res = await this.spawnCmd(cmd.command, cmd.args, { cwd: cmd.cwd });
-      stdout = res.stdout;
-      stderr = res.stderr;
-      exitCode = res.code;
-    } catch (err) {
-      stderr = String(err);
-      exitCode = null;
+    const res = await runProcess(cmd.command, cmd.args, {
+      cwd: cmd.cwd,
+      timeoutMs: this.commandTimeoutMs,
+    });
+    stdout = res.stdout;
+    stderr = res.stderr;
+    exitCode = res.code;
+    if (res.timedOut) {
+      stderr += (stderr ? "\n" : "") + `verification command timed out after ${this.commandTimeoutMs}ms`;
     }
 
     const endTime = new Date().toISOString();
@@ -194,24 +234,8 @@ export class VerificationEngine {
     return true;
   }
 
-  private spawnCmd(command: string, args: string[], opts: { cwd: string }): Promise<{ code: number; stdout: string; stderr: string }> {
-    return new Promise((resolve, reject) => {
-      const proc = spawn(command, args, {
-        cwd: opts.cwd,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env },
-        windowsHide: false,
-      });
-      let stdout = "";
-      let stderr = "";
-      proc.stdout.on("data", (d) => (stdout += d.toString()));
-      proc.stderr.on("data", (d) => (stderr += d.toString()));
-      proc.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
-      proc.on("error", (err) => reject(err));
-    });
-  }
 }
 
 function cryptoRandomId(): string {
-  return require("node:crypto").randomUUID();
+  return crypto.randomUUID();
 }
