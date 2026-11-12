@@ -182,14 +182,7 @@ export class SecurityManager {
 
   // Secret redaction for logs/outputs. Preserves git SHAs (40/64 hex chars).
   redactSecrets(text: string): string {
-    let out = text;
-    out = out.replace(/ghp_[A-Za-z0-9]{36}/g, "[REDACTED_TOKEN]");
-    out = out.replace(/github_pat_[A-Za-z0-9_]{20,}/g, "[REDACTED_TOKEN]");
-    out = out.replace(/sk-[A-Za-z0-9]{20,}/g, "[REDACTED_TOKEN]");
-    out = out.replace(/[A-Za-z0-9+/]{40,}={0,2}/g, (m) =>
-      /^[a-f0-9]{40}$/i.test(m) || /^[a-f0-9]{64}$/i.test(m) ? m : "[REDACTED]"
-    );
-    return out;
+    return redactSecrets(text);
   }
 
   // Check a command against deny-list patterns.
@@ -205,6 +198,18 @@ export class SecurityManager {
 }
 
 export { SENSITIVE_PATH_PATTERNS, BRIDGE_PROTECTED };
+
+// Secret redaction for logs/outputs. Preserves git SHAs (40/64 hex chars).
+export function redactSecrets(text: string): string {
+  let out = text;
+  out = out.replace(/ghp_[A-Za-z0-9]{36}/g, "[REDACTED_TOKEN]");
+  out = out.replace(/github_pat_[A-Za-z0-9_]{20,}/g, "[REDACTED_TOKEN]");
+  out = out.replace(/sk-[A-Za-z0-9]{20,}/g, "[REDACTED_TOKEN]");
+  out = out.replace(/[A-Za-z0-9+/]{40,}={0,2}/g, (m) =>
+    /^[a-f0-9]{40}$/i.test(m) || /^[a-f0-9]{64}$/i.test(m) ? m : "[REDACTED]"
+  );
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Kilo worktree permission configuration (schema-verified for Kilo 7.8.x).

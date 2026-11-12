@@ -1,11 +1,12 @@
 "use strict";
 
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import type { BridgeResult, KiloEvent } from "../types";
 import { okResult, failResult } from "../types";
+import { runProcess } from "./process";
+import { redactSecrets } from "./security";
 
 export interface KiloAdapterOptions {
   kiloBin?: string;
@@ -17,9 +18,6 @@ export interface KiloAdapterOptions {
   timeoutMs?: number;
   auto?: boolean;
   format?: string;
-  cwd?: string;
-  mock?: boolean; // Stage C: use a mock executable
-  mockCommand?: string;
 }
 
 export interface KiloRunResult {
@@ -38,6 +36,18 @@ export interface KiloRunResult {
   error?: string;
 }
 
+export interface KiloPreflightResult {
+  version: string;
+  options: string[];
+  authenticated: boolean;
+  model?: string;
+  agent?: string;
+}
+
+// Required `kilo run` options, validated against the INSTALLED CLI's help
+// output (spec §6: never assume an option works from an example).
+const REQUIRED_RUN_OPTIONS = ["--auto", "--format", "--dir", "--title"];
+
 export class KiloCliAdapter {
   private readonly kiloBin: string;
   private readonly options: KiloAdapterOptions;
@@ -49,12 +59,17 @@ export class KiloCliAdapter {
     this.options = options;
   }
 
+  private probe(args: string[], timeoutMs = 60_000) {
+    // Probes run in an existing directory; the worktree may not exist yet.
+    return runProcess(this.kiloBin, args, { cwd: os.tmpdir(), timeoutMs });
+  }
+
   // ------------------------------------------------------------------
   // Detection & validation
   // ------------------------------------------------------------------
 
   async detectExecutable(): Promise<BridgeResult<string>> {
-    const res = await this.runCmd([this.kiloBin, "--version"], {});
+    const res = await this.probe(["--version"]);
     if (res.code === 127) {
       return failResult(
         `Kilo CLI executable not found: ${this.kiloBin}. Install @kilocode/cli and ensure 'kilo' is on PATH.`,
@@ -62,14 +77,14 @@ export class KiloCliAdapter {
       );
     }
     if (res.code !== 0) {
-      return failResult(`Kilo --version failed: ${res.stderr.trim()}`, "KILO_VERSION_FAILED");
+      return failResult(`kilo --version failed: ${res.stderr.trim()}`, "KILO_VERSION_FAILED");
     }
     this.kiloVersion = res.stdout.trim();
     return okResult(this.kiloVersion);
   }
 
   async readHelp(): Promise<BridgeResult<string>> {
-    const res = await this.runCmd([this.kiloBin, "run", "--help"], {});
+    const res = await this.probe(["run", "--help"]);
     if (res.code !== 0) {
       return failResult(`kilo run --help failed: ${res.stderr.trim()}`, "KILO_HELP_FAILED");
     }
@@ -82,13 +97,66 @@ export class KiloCliAdapter {
   }
 
   async validateAuth(): Promise<BridgeResult<void>> {
-    // Kilo auth validation is best-effort; kilo run will surface auth errors.
-    // Attempt a lightweight probe that does not execute tasks.
-    const res = await this.runCmd([this.kiloBin, "run", "--help"], {});
-    if (res.code !== 0 && /auth|login|token/i.test(res.stderr)) {
-      return failResult(`Kilo authentication issue: ${res.stderr.trim()}`, "KILO_AUTH_FAILED");
+    const res = await this.probe(["auth", "list"]);
+    const output = res.stdout + "\n" + res.stderr;
+    if (res.code !== 0) {
+      return failResult(`kilo auth list failed: ${output.trim()}`, "KILO_AUTH_FAILED");
+    }
+    if (/0 credentials|no credentials|not logged in|no providers/i.test(output)) {
+      return failResult("Kilo CLI has no configured credentials. Run 'kilo auth login'.", "KILO_AUTH_FAILED");
     }
     return okResult();
+  }
+
+  async validateModel(model: string): Promise<BridgeResult<void>> {
+    const res = await this.probe(["models"], 120_000);
+    if (res.code !== 0) {
+      return failResult(`kilo models failed: ${res.stderr.trim()}`, "KILO_MODELS_FAILED");
+    }
+    if (!res.stdout.includes(model)) {
+      return failResult(`configured model not available: ${model}`, "KILO_MODEL_UNAVAILABLE");
+    }
+    return okResult();
+  }
+
+  async validateAgent(agent: string): Promise<BridgeResult<void>> {
+    const res = await this.probe(["agent", "list"], 120_000);
+    if (res.code !== 0) {
+      return failResult(`kilo agent list failed: ${res.stderr.trim()}`, "KILO_AGENTS_FAILED");
+    }
+    if (!res.stdout.includes(agent)) {
+      return failResult(`configured agent not available: ${agent}`, "KILO_AGENT_UNAVAILABLE");
+    }
+    return okResult();
+  }
+
+  // Full preflight: detect, help-option validation, auth, model/agent.
+  async preflight(): Promise<BridgeResult<KiloPreflightResult>> {
+    const version = await this.detectExecutable();
+    if (!version.ok) return failResult(version.error!, version.code);
+    const help = await this.readHelp();
+    if (!help.ok) return failResult(help.error!, help.code);
+    const missing = REQUIRED_RUN_OPTIONS.filter((o) => !this.hasOption(o));
+    if (missing.length > 0) {
+      return failResult(`installed Kilo CLI lacks required options: ${missing.join(", ")}`, "KILO_OPTIONS_MISSING");
+    }
+    const auth = await this.validateAuth();
+    if (!auth.ok) return failResult(auth.error!, auth.code);
+    if (this.options.model) {
+      const m = await this.validateModel(this.options.model);
+      if (!m.ok) return failResult(m.error!, m.code);
+    }
+    if (this.options.agent) {
+      const a = await this.validateAgent(this.options.agent);
+      if (!a.ok) return failResult(a.error!, a.code);
+    }
+    return okResult({
+      version: version.data!,
+      options: REQUIRED_RUN_OPTIONS,
+      authenticated: true,
+      model: this.options.model,
+      agent: this.options.agent,
+    });
   }
 
   // ------------------------------------------------------------------
@@ -96,16 +164,6 @@ export class KiloCliAdapter {
   // ------------------------------------------------------------------
 
   async run(): Promise<KiloRunResult> {
-    const start = process.hrtime.bigint();
-    const events: KiloEvent[] = [];
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    let exitCode: number | null = null;
-    let error: string | undefined;
-    let sessionId: string | undefined;
-    let finalResponse: string | undefined;
-
     const worktree = this.options.worktreePath;
     if (!fs.existsSync(worktree)) {
       fs.mkdirSync(worktree, { recursive: true });
@@ -114,215 +172,122 @@ export class KiloCliAdapter {
     const args = this.buildArgs();
     const timeoutMs = this.options.timeoutMs ?? 6 * 60 * 60 * 1000;
 
-    let proc: ReturnType<typeof spawn> | null = null;
-    let timer: NodeJS.Timeout | null = null;
-
-    const runPromise = new Promise<KiloRunResult>((resolve) => {
-      proc = spawn(this.kiloBin, args, {
-        cwd: worktree,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, KILO_AUTO: this.options.auto ? "1" : undefined },
-        windowsHide: false,
-      });
-
-      proc.stdout!.on("data", (d) => {
-        const text = d.toString();
-        stdout += text;
-        this.parseEvents(text, events);
-      });
-      proc.stderr!.on("data", (d) => {
-        const text = d.toString();
-        stderr += text;
-      });
-
-      const killTree = () => {
-        if (!proc) return;
-        try {
-          if (os.platform() === "win32") {
-            spawn("taskkill", ["/F", "/T", "/PID", String(proc.pid)], { stdio: "ignore" });
-          } else {
-            proc.kill("SIGKILL");
-          }
-        } catch {
-          // ignore
-        }
-      };
-
-      timer = setTimeout(() => {
-        timedOut = true;
-        killTree();
-      }, timeoutMs);
-
-      proc.on("close", (code) => {
-        if (timer) clearTimeout(timer);
-        exitCode = code ?? null;
-        if (timedOut && exitCode === null) exitCode = null;
-        const end = process.hrtime.bigint();
-        const durationMs = Number(end - start) / 1_000_000;
-        resolve({
-          exitCode,
-          durationMs,
-          sessionId,
-          model: this.options.model,
-          agent: this.options.agent,
-          kiloVersion: this.kiloVersion ?? undefined,
-          finalResponse,
-          events,
-          eventLogPath: "", // set after writing
-          stdout: stdout.trim(),
-          stderr: stderr.trim(),
-          timedOut,
-          error: timedOut ? "execution timed out" : undefined,
-        });
-      });
-
-      proc.on("error", (err) => {
-        if (timer) clearTimeout(timer);
-        error = err.message;
-        resolve({
-          exitCode: null,
-          durationMs: Number(process.hrtime.bigint() - start) / 1_000_000,
-          sessionId,
-          model: this.options.model,
-          agent: this.options.agent,
-          kiloVersion: this.kiloVersion ?? undefined,
-          finalResponse,
-          events,
-          eventLogPath: "",
-          stdout: stdout.trim(),
-          stderr: stderr.trim(),
-          timedOut: false,
-          error,
-        });
-      });
+    const res = await runProcess(this.kiloBin, args, {
+      cwd: worktree,
+      timeoutMs,
     });
 
-    const result = await runPromise;
+    const events = this.parseEvents(res.stdout);
+    const sessionId = this.extractSessionId(events);
+    const finalResponse = this.extractFinalResponse(events);
 
-    // Preserve event log.
+    // Preserve the original event log (operational events only, redacted).
     const logDir = path.join(worktree, ".kilo-bridge");
     if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
     const eventLogPath = path.join(logDir, `kilo-events-${Date.now()}.json`);
-    const redactedEvents = events.map((e) => this.redactEvent(e));
-    fs.writeFileSync(eventLogPath, JSON.stringify(redactedEvents, null, 2), "utf8");
-
-    // Extract final response from last assistant-like event.
-    const finalResp = this.extractFinalResponse(events, stdout);
+    const operational = events.filter((e) => !this.isReasoningEvent(e)).map((e) => this.redactEvent(e));
+    fs.writeFileSync(eventLogPath, JSON.stringify(operational, null, 2), "utf8");
 
     return {
-      ...result,
+      exitCode: res.code === 127 ? null : res.code,
+      durationMs: res.durationMs,
+      sessionId,
+      model: this.options.model,
+      agent: this.options.agent,
+      kiloVersion: this.kiloVersion ?? undefined,
+      finalResponse,
+      events: operational,
       eventLogPath,
-      finalResponse: finalResp ?? result.finalResponse,
+      stdout: redactSecrets(res.stdout),
+      stderr: redactSecrets(res.stderr),
+      timedOut: res.timedOut,
+      error: res.timedOut
+        ? "execution timed out"
+        : res.code === 127
+          ? `kilo executable not found: ${this.kiloBin}`
+          : undefined,
     };
   }
 
+  // All options BEFORE the variadic positional message (yargs consumes
+  // everything after the first positional as message content).
   private buildArgs(): string[] {
     const args: string[] = ["run"];
     if (this.options.auto) args.push("--auto");
-    if (this.options.format) args.push("--format", this.options.format);
-    else args.push("--format", "json");
+    args.push("--format", this.options.format ?? "json");
     args.push("--dir", this.options.worktreePath);
     args.push("--title", this.options.taskTitle);
-    // Task specification as a separate argument (no shell interpolation).
-    args.push(this.options.taskSpec);
     if (this.options.model) args.push("--model", this.options.model);
     if (this.options.agent) args.push("--agent", this.options.agent);
+    // Task specification as a single positional argument — never interpolated
+    // into a shell command (spec §1).
+    args.push(this.options.taskSpec);
     return args;
   }
 
-  private parseEvents(text: string, events: KiloEvent[]): void {
-    // Kilo may emit newline-delimited JSON events. Parse each line.
-    for (const line of text.split(/\r?\n/)) {
+  private parseEvents(stdout: string): KiloEvent[] {
+    const events: KiloEvent[] = [];
+    for (const line of stdout.split(/\r?\n/)) {
       const trimmed = line.trim();
-      if (!trimmed) continue;
+      if (!trimmed || !trimmed.startsWith("{")) continue;
       try {
         const ev = JSON.parse(trimmed);
-        if (ev && typeof ev === "object") {
-          events.push(ev as KiloEvent);
-          if (ev.session_id) {
-            // captured externally via result mutation handled by caller
-          }
-          if (ev.type && /final|response|result/i.test(ev.type) && ev.data) {
-            // candidate final response
-          }
-        }
+        if (ev && typeof ev === "object") events.push(ev as KiloEvent);
       } catch {
-        // Not JSON; ignore non-JSON lines (operational logs only).
+        // Non-JSON operational output is not an event.
       }
     }
+    return events;
   }
 
-  private extractFinalResponse(events: KiloEvent[], stdout: string): string | undefined {
-    // Prefer the last event with a textual final response.
-    for (let i = events.length - 1; i >= 0; i--) {
-      const ev = events[i];
-      const data = ev.data;
-      if (data && typeof data === "object") {
-        const obj = data as Record<string, unknown>;
-        for (const key of ["response", "text", "content", "finalResponse", "result"]) {
-          if (typeof obj[key] === "string" && obj[key].trim().length > 0) {
-            return obj[key];
-          }
-        }
+  private extractSessionId(events: KiloEvent[]): string | undefined {
+    for (const ev of events) {
+      const anyEv = ev as any;
+      const candidates = [
+        anyEv.session_id,
+        anyEv.sessionID,
+        anyEv.data?.session_id,
+        anyEv.properties?.sessionID,
+        anyEv.properties?.info?.id,
+        anyEv.properties?.part?.sessionID,
+      ];
+      for (const c of candidates) {
+        if (typeof c === "string" && c.length > 0) return c;
       }
-      if (typeof ev.text === "string" && ev.text.trim().length > 0) return ev.text;
     }
     return undefined;
   }
 
-  private redactEvent(ev: KiloEvent): KiloEvent {
-    const out: KiloEvent = { ...ev };
-    if (out.data && typeof out.data === "object") {
-      out.data = this.redactValue(out.data);
-    }
-    return out;
-  }
-
-  private redactValue(v: unknown): unknown {
-    if (typeof v === "string") {
-      return this.redactString(v);
-    }
-    if (Array.isArray(v)) return v.map((x) => this.redactValue(x));
-    if (v && typeof v === "object") {
-      const o: Record<string, unknown> = {};
-      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-        const keyLower = k.toLowerCase();
-        if (/key|token|secret|password|passwd|auth|credential/.test(keyLower)) {
-          o[k] = "[REDACTED]";
-        } else {
-          o[k] = this.redactValue(val);
+  // Extract the agent's final response: the last assistant text part.
+  // Reasoning/thinking parts are never stored (spec §6).
+  private extractFinalResponse(events: KiloEvent[]): string | undefined {
+    let last: string | undefined;
+    for (const ev of events) {
+      if (this.isReasoningEvent(ev)) continue;
+      const anyEv = ev as any;
+      const part = anyEv.properties?.part ?? anyEv.part;
+      if (part && part.type === "text" && typeof part.text === "string" && part.text.trim()) {
+        last = part.text;
+        continue;
+      }
+      const data = anyEv.data;
+      if (data && typeof data === "object") {
+        for (const key of ["finalResponse", "response", "result", "text", "content"]) {
+          if (typeof data[key] === "string" && data[key].trim()) last = data[key];
         }
       }
-      return o;
+      if (typeof anyEv.text === "string" && anyEv.text.trim()) last = anyEv.text;
     }
-    return v;
+    return last;
   }
 
-  private redactString(s: string): string {
-    return s
-      .replace(/ghp_[A-Za-z0-9]{36}/g, "[REDACTED_TOKEN]")
-      .replace(/github_pat_[A-Za-z0-9_]{20,}/g, "[REDACTED_TOKEN]")
-      .replace(/sk-[A-Za-z0-9]{20,}/g, "[REDACTED_TOKEN]")
-      .replace(/[A-Za-z0-9+/]{40,}=*/g, "[REDACTED]");
+  private isReasoningEvent(ev: KiloEvent): boolean {
+    const anyEv = ev as any;
+    const partType = anyEv.properties?.part?.type ?? anyEv.part?.type ?? anyEv.type;
+    return typeof partType === "string" && /reasoning|thinking|chain.of.thought/i.test(partType);
   }
 
-  private runCmd(args: string[], opts: { cwd?: string; input?: string } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
-    return new Promise((resolve) => {
-      const proc = spawn(this.kiloBin, args, {
-        cwd: opts.cwd ?? this.options.worktreePath,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env },
-        windowsHide: false,
-      });
-      let stdout = "";
-      let stderr = "";
-      proc.stdout!.on("data", (d) => (stdout += d.toString()));
-      proc.stderr!.on("data", (d) => (stderr += d.toString()));
-      if (opts.input) {
-        try { proc.stdin.write(opts.input); proc.stdin.end(); } catch { /* ignore */ }
-      }
-      proc.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
-      proc.on("error", (err) => resolve({ code: 127, stdout, stderr: err.message }));
-    });
+  private redactEvent(ev: KiloEvent): KiloEvent {
+    return JSON.parse(redactSecrets(JSON.stringify(ev))) as KiloEvent;
   }
 }
