@@ -347,4 +347,8 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-main(process.argv).then((code) => process.exit(code));
+// Set exitCode and let the event loop drain: process.exit() during pending
+// pipe writes triggers a libuv assertion on Windows (UV_HANDLE_CLOSING).
+main(process.argv).then((code) => {
+  process.exitCode = code;
+});
