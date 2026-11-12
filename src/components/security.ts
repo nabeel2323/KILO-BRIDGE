@@ -4,6 +4,7 @@ import path from "node:path";
 import fs from "node:fs";
 import type { SecurityPolicy, BridgeResult, ProjectConfig } from "../types";
 import { okResult, failResult } from "../types";
+import { runProcess } from "./process";
 
 const SENSITIVE_PATH_PATTERNS = [
   ".env",
@@ -65,49 +66,15 @@ export class SecurityManager {
     };
   }
 
-  // Write a Kilo permission config file inside the worktree.
-  // The exact schema must match the detected Kilo version; this is the
-  // Bridge's best-effort representation and is validated by the Kilo adapter.
+  // Write the project-level Kilo permission configuration into the worktree.
+  // Schema verified against the installed Kilo CLI (https://app.kilo.ai/config.json):
+  // `permission` accepts per-tool rules; each rule is "ask"|"allow"|"deny" or a
+  // pattern->action map (last matching pattern wins). `--auto` auto-approves
+  // anything not explicitly denied, so every dangerous operation MUST be an
+  // explicit "deny" — never "ask".
   writeKiloPermissionFile(worktreePath: string, policy: SecurityPolicy): BridgeResult<string> {
-    const config = {
-      version: "1.0",
-      projectId: this.projectId,
-      scope: worktreePath,
-      default: "deny",
-      allow: [
-        { path: "**", operation: ["read", "edit", "create"], comment: "source-code reading and editing within worktree" },
-      ],
-      deny: [
-        { path: ".env*", operation: ["*"], comment: "environment/secret files" },
-        { path: "secrets/**", operation: ["*"], comment: "secret directories" },
-        { path: "credentials/**", operation: ["*"], comment: "credential directories" },
-        { path: "*.{pem,key,crt}", operation: ["*"], comment: "certificate and key files" },
-        { path: ".git/**", operation: ["push", "commit", "merge"], comment: "git push/commit/merge prohibited from Kilo" },
-        { path: "node_modules/**", operation: ["write"], comment: "no package installs from Kilo" },
-        { path: "infra/**", operation: ["*"], comment: "deployment infrastructure prohibited" },
-        { path: "db/**", operation: ["migrate", "reset", "seed"], comment: "database mutations prohibited" },
-        { path: `${this.bridgeRoot}/**`, operation: ["*"], comment: "Bridge configuration and credentials protected" },
-        { path: "outside_worktree/**", operation: ["*"], comment: "external directory access denied" },
-      ],
-      shell: {
-        allowUnapproved: false,
-        denyList: [
-          "pnpm db:migrate",
-          "pnpm db:seed",
-          "pnpm db:reset",
-          "pnpm infra:up",
-          "pnpm infra:down",
-          "git push",
-          "git commit",
-          "git merge",
-          "docker compose up",
-          "kubectl",
-        ],
-      },
-      createdAt: policy.createdAt,
-    };
-
-    const file = path.join(worktreePath, "kilo.permissions.json");
+    const config = buildKiloPermissionConfig(this.bridgeRoot);
+    const file = path.join(worktreePath, "kilo.json");
     try {
       if (!fs.existsSync(worktreePath)) fs.mkdirSync(worktreePath, { recursive: true });
       fs.writeFileSync(file, JSON.stringify(config, null, 2), "utf8");
@@ -115,6 +82,43 @@ export class SecurityManager {
     } catch (err) {
       return failResult(`failed to write kilo permission file: ${err}`, "PERMISSION_WRITE_FAILED");
     }
+  }
+
+  // Verify the effective permission configuration before autonomous execution.
+  // 1. Bridge-side assertion: the worktree kilo.json must contain every
+  //    required explicit denial (tamper/merge check).
+  // 2. Kilo-side validation: `kilo config check` in the worktree must pass.
+  // If either fails, autonomous execution must be refused (spec §7).
+  async verifyEffectivePermissions(
+    worktreePath: string,
+    opts: { kiloBin?: string; skipKiloCheck?: boolean } = {}
+  ): Promise<BridgeResult<{ file: string; kiloCheck: string }>> {
+    const file = path.join(worktreePath, "kilo.json");
+    if (!fs.existsSync(file)) {
+      return failResult(`missing worktree permission config: ${file}`, "PERMISSION_CONFIG_MISSING");
+    }
+    let parsed: any;
+    try {
+      parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch (err) {
+      return failResult(`worktree kilo.json is not valid JSON: ${err}`, "PERMISSION_CONFIG_INVALID");
+    }
+    const missing = findMissingDenials(parsed);
+    if (missing.length > 0) {
+      return failResult(`worktree permission config missing required denials: ${missing.join(", ")}`, "PERMISSION_DENIALS_MISSING");
+    }
+    if (opts.skipKiloCheck) {
+      return okResult({ file, kiloCheck: "skipped (mock mode)" });
+    }
+    const res = await runProcess(opts.kiloBin ?? process.env.KILO_BIN ?? "kilo", ["config", "check"], {
+      cwd: worktreePath,
+      timeoutMs: 60_000,
+    });
+    const output = (res.stdout + "\n" + res.stderr).trim();
+    if (res.code !== 0 || /error|invalid|unknown key/i.test(output)) {
+      return failResult(`kilo config check failed: ${output.slice(0, 500)}`, "PERMISSION_CHECK_FAILED");
+    }
+    return okResult({ file, kiloCheck: output.slice(0, 500) });
   }
 
   // Bridge-level command policy: independent of Kilo's own permissions.
@@ -167,20 +171,24 @@ export class SecurityManager {
   }
 
   // Path-traversal guard: ensure a path resolves within the worktree.
+  // Case-insensitive on Windows; absolute targets outside the root rejected.
   isPathWithinWorktree(worktreePath: string, target: string): boolean {
     const resolved = path.resolve(worktreePath, target);
     const root = path.resolve(worktreePath);
-    return resolved === root || resolved.startsWith(root + path.sep);
+    const a = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    const b = process.platform === "win32" ? root.toLowerCase() : root;
+    return a === b || a.startsWith(b + path.sep);
   }
 
-  // Secret redaction for logs/outputs.
+  // Secret redaction for logs/outputs. Preserves git SHAs (40/64 hex chars).
   redactSecrets(text: string): string {
     let out = text;
-    // Reduce common secret-like patterns without storing secrets.
-    out = out.replace(/[A-Za-z0-9+/]{40,}=*/g, "[REDACTED]");
     out = out.replace(/ghp_[A-Za-z0-9]{36}/g, "[REDACTED_TOKEN]");
     out = out.replace(/github_pat_[A-Za-z0-9_]{20,}/g, "[REDACTED_TOKEN]");
     out = out.replace(/sk-[A-Za-z0-9]{20,}/g, "[REDACTED_TOKEN]");
+    out = out.replace(/[A-Za-z0-9+/]{40,}={0,2}/g, (m) =>
+      /^[a-f0-9]{40}$/i.test(m) || /^[a-f0-9]{64}$/i.test(m) ? m : "[REDACTED]"
+    );
     return out;
   }
 
@@ -197,3 +205,111 @@ export class SecurityManager {
 }
 
 export { SENSITIVE_PATH_PATTERNS, BRIDGE_PROTECTED };
+
+// ---------------------------------------------------------------------------
+// Kilo worktree permission configuration (schema-verified for Kilo 7.8.x).
+// Ordering matters: default deny first, then allows, then explicit denies
+// (last matching pattern wins in Kilo's permission evaluation).
+// ---------------------------------------------------------------------------
+
+export const REQUIRED_FILE_DENIALS = [
+  ".env*",
+  "**/.env*",
+  "**/secrets/**",
+  "**/credentials/**",
+  "**/*.pem",
+  "**/*.key",
+  "**/id_rsa*",
+  "**/id_ed25519*",
+  ".git/**",
+  "**/node_modules/**",
+];
+
+export const REQUIRED_BASH_DENIALS = [
+  "git push*",
+  "git commit*",
+  "git merge*",
+  "git reset*",
+  "git checkout*",
+  "git clean*",
+  "*db:migrate*",
+  "*db:seed*",
+  "*db:reset*",
+  "*infra:up*",
+  "*infra:down*",
+  "*kubectl*",
+  "*docker*",
+  "gh *",
+];
+
+export function buildKiloPermissionConfig(bridgeRoot: string): Record<string, unknown> {
+  const fileDenies: Record<string, string> = {};
+  for (const p of REQUIRED_FILE_DENIALS) fileDenies[p] = "deny";
+  // Protect the Bridge installation (config, database, logs, reports).
+  const bridgeGlob = bridgeRoot.replace(/\\/g, "/").replace(/\*/g, "\\*") + "/**";
+  fileDenies[bridgeGlob] = "deny";
+
+  const bash: Record<string, string> = { "*": "deny" };
+  const allows = [
+    "git status*", "git diff*", "git log*", "git show*", "git branch*", "git rev-parse*",
+    "ls*", "dir*", "cat *", "type *", "Get-Content*", "Get-ChildItem*",
+    "pnpm lint*", "pnpm typecheck*", "pnpm test*", "pnpm build*", "pnpm format*",
+    "npm run lint*", "npm run typecheck*", "npm run test*", "npm run build*",
+    "node --version", "python --version", "php --version", "flutter --version",
+  ];
+  for (const p of allows) bash[p] = "allow";
+  for (const p of REQUIRED_BASH_DENIALS) bash[p] = "deny";
+  const extraDenies = [
+    "rm *", "del *", "erase *", "rmdir *", "Remove-Item*", "rd *",
+    "curl *", "wget *", "Invoke-WebRequest*", "Invoke-RestMethod*", "iwr *",
+    "ssh *", "scp *", "ftp *", "*deploy*", "*production*",
+    "powershell*", "pwsh*", "cmd *", "bash *", "sh *", "wscript*", "cscript*",
+    "format *", "format:*", "*mkfs*", "*shutdown*", "*restart-computer*",
+  ];
+  for (const p of extraDenies) bash[p] = "deny";
+
+  return {
+    $schema: "https://app.kilo.ai/config.json",
+    permission: {
+      read: { "**": "allow", ...fileDenies },
+      edit: { "**": "allow", ...fileDenies },
+      bash,
+      external_directory: "deny",
+      webfetch: "deny",
+      websearch: "deny",
+      doom_loop: "deny",
+    },
+  };
+}
+
+// Assert that a parsed worktree kilo.json contains every required denial.
+export function findMissingDenials(config: any): string[] {
+  const missing: string[] = [];
+  const perm = config?.permission;
+  if (!perm || typeof perm !== "object") {
+    return ["permission object"];
+  }
+  for (const tool of ["read", "edit"]) {
+    const rules = perm[tool];
+    if (!rules || typeof rules !== "object") {
+      missing.push(`permission.${tool} rules`);
+      continue;
+    }
+    for (const p of REQUIRED_FILE_DENIALS) {
+      if (rules[p] !== "deny") missing.push(`permission.${tool}[${p}]`);
+    }
+  }
+  const bash = perm.bash;
+  if (!bash || typeof bash !== "object") {
+    missing.push("permission.bash rules");
+  } else {
+    if (bash["*"] !== "deny") missing.push("permission.bash[*] default deny");
+    for (const p of REQUIRED_BASH_DENIALS) {
+      if (bash[p] !== "deny") missing.push(`permission.bash[${p}]`);
+    }
+  }
+  for (const tool of ["external_directory", "webfetch", "websearch", "doom_loop"]) {
+    if (perm[tool] !== "deny") missing.push(`permission.${tool}`);
+  }
+  return missing;
+}
