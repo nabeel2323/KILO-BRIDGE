@@ -2,6 +2,7 @@
 
 import path from "node:path";
 import fs from "node:fs";
+import crypto from "node:crypto";
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js";
 import type {
   ProjectConfig,
@@ -74,6 +75,7 @@ export class SqliteStore {
     const db = new SQL.Database(buf);
     this.db = db;
     this.applyMigrations(db);
+    this.persist();
     return {
       db,
       close: () => this.close(),
@@ -81,7 +83,7 @@ export class SqliteStore {
     };
   }
 
-  private close(): void {
+  close(): void {
     if (this.db) {
       try {
         fs.writeFileSync(this.dbPath, this.export());
@@ -91,6 +93,23 @@ export class SqliteStore {
       this.db.close();
       this.db = null;
     }
+  }
+
+  // Persist the in-memory database to disk. Called after every mutation so
+  // leases, transitions and executions survive crashes (spec: persistent lease).
+  persist(): void {
+    if (!this.db) return;
+    const dir = path.dirname(this.dbPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const tmp = this.dbPath + ".tmp";
+    fs.writeFileSync(tmp, this.export());
+    fs.renameSync(tmp, this.dbPath);
+  }
+
+  private mutate(sql: string, params?: unknown[]): void {
+    const db = this.requireDb();
+    db.run(sql, params as any);
+    this.persist();
   }
 
   private export(): Uint8Array {
@@ -233,12 +252,11 @@ export class SqliteStore {
   // ---------- projects ----------
   upsertProject(config: ProjectConfig, state: string): void {
     const now = new Date().toISOString();
-    const db = this.requireDb();
-    db.run(
+    this.mutate(
       `INSERT INTO projects (id, config, state, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET config=excluded.config, state=excluded.state, updated_at=excluded.updated_at`,
-      [JSON.stringify(config), state, now, now]
+      [config.id, JSON.stringify(config), state, now, now]
     );
   }
 
@@ -260,16 +278,14 @@ export class SqliteStore {
   }
 
   setProjectState(id: string, state: string): void {
-    const db = this.requireDb();
     const now = new Date().toISOString();
-    db.run(`UPDATE projects SET state = ?, updated_at = ? WHERE id = ?`, [state, now, id]);
+    this.mutate(`UPDATE projects SET state = ?, updated_at = ? WHERE id = ?`, [state, now, id]);
   }
 
   // ---------- tasks ----------
   upsertTask(task: TaskRecord): void {
     const now = new Date().toISOString();
-    const db = this.requireDb();
-    db.run(
+    this.mutate(
       `INSERT INTO tasks (id, project_id, issue_number, issue_url, title, author, body, status,
         base_sha, feature_branch, worktree_path, execution_id, attempt, idempotency_key,
         lease_holder, lease_expires_at, last_comment_id, created_at, updated_at)
@@ -326,8 +342,21 @@ export class SqliteStore {
   }
 
   setLastCommentId(taskId: string, commentId: number): void {
+    this.mutate(`UPDATE tasks SET last_comment_id = ?, updated_at = ? WHERE id = ?`, [commentId, new Date().toISOString(), taskId]);
+  }
+
+  getTaskByProjectIssue(projectId: string, issueNumber: number): TaskRecord | null {
     const db = this.requireDb();
-    db.run(`UPDATE tasks SET last_comment_id = ?, updated_at = ? WHERE id = ?`, [commentId, new Date().toISOString(), taskId]);
+    const row = readOne(db, `SELECT * FROM tasks WHERE project_id = ? AND issue_number = ?`, [projectId, issueNumber]);
+    return row ? this.mapTask(row) : null;
+  }
+
+  listTasksByStatuses(statuses: string[]): TaskRecord[] {
+    if (statuses.length === 0) return [];
+    const db = this.requireDb();
+    const placeholders = statuses.map(() => "?").join(",");
+    const rows = readAll(db, `SELECT * FROM tasks WHERE status IN (${placeholders}) ORDER BY created_at`, statuses);
+    return rows.map((r) => this.mapTask(r));
   }
 
   private mapTask(row: Row): TaskRecord {
@@ -356,8 +385,7 @@ export class SqliteStore {
 
   // ---------- transitions ----------
   insertTransition(t: TaskTransition): void {
-    const db = this.requireDb();
-    db.run(
+    this.mutate(
       `INSERT INTO task_transitions (id, task_id, from_status, to_status, reason, actor, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [t.id, t.taskId, t.fromStatus ?? null, t.toStatus, t.reason ?? null, t.actor ?? null, t.createdAt]
@@ -380,8 +408,7 @@ export class SqliteStore {
 
   // ---------- executions ----------
   upsertExecution(e: ExecutionRecord): void {
-    const db = this.requireDb();
-    db.run(
+    this.mutate(
       `INSERT INTO executions (id, task_id, attempt, status, start_time, end_time, exit_code,
         duration_ms, kilo_version, kilo_session_id, kilo_model, kilo_agent, event_log_path, error_message)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -433,8 +460,7 @@ export class SqliteStore {
 
   // ---------- verifications ----------
   insertVerification(v: Omit<VerificationRecord, "id">): void {
-    const db = this.requireDb();
-    db.run(
+    this.mutate(
       `INSERT INTO verifications (id, execution_id, command, args, cwd, start_time, end_time,
         exit_code, duration_ms, stdout_path, stderr_path, passed)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -467,8 +493,7 @@ export class SqliteStore {
 
   // ---------- reports ----------
   upsertReport(r: ReportRecord): void {
-    const db = this.requireDb();
-    db.run(
+    this.mutate(
       `INSERT INTO reports (id, task_id, execution_id, status, report_path, issue_comment_id, posted_at, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
@@ -495,8 +520,7 @@ export class SqliteStore {
 
   // ---------- security policies ----------
   upsertSecurityPolicy(policy: SecurityPolicy): void {
-    const db = this.requireDb();
-    db.run(
+    this.mutate(
       `INSERT INTO security_policies (project_id, config, created_at)
        VALUES (?, ?, ?)
        ON CONFLICT(project_id) DO UPDATE SET config=excluded.config`,
@@ -519,8 +543,30 @@ export class SqliteStore {
   }
 
   setMeta(key: string, value: string): void {
+    this.mutate(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [key, value]);
+  }
+
+  // ---------- audit ----------
+  insertAudit(entry: { projectId?: string; actor?: string; action: string; detail?: string }): void {
+    this.mutate(
+      `INSERT INTO audit_log (id, project_id, actor, action, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      [crypto.randomUUID(), entry.projectId ?? null, entry.actor ?? null, entry.action, entry.detail ?? null, new Date().toISOString()]
+    );
+  }
+
+  listAudit(projectId?: string, limit: number = 100): Array<{ id: string; projectId?: string; actor?: string; action: string; detail?: string; createdAt: string }> {
     const db = this.requireDb();
-    db.run(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [key, value]);
+    const rows = projectId
+      ? readAll(db, `SELECT * FROM audit_log WHERE project_id = ? ORDER BY created_at DESC LIMIT ?`, [projectId, limit])
+      : readAll(db, `SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?`, [limit]);
+    return rows.map((r) => ({
+      id: String(r.id),
+      projectId: rowOptStr(r.project_id),
+      actor: rowOptStr(r.actor),
+      action: String(r.action),
+      detail: rowOptStr(r.detail),
+      createdAt: String(r.created_at),
+    }));
   }
 
   private requireDb(): SqlJsDatabase {
@@ -552,5 +598,5 @@ function rowOptNum(v: unknown): number | undefined {
 }
 
 function cryptoRandomId(): string {
-  return (require("node:crypto") as { randomUUID: () => string }).randomUUID();
+  return crypto.randomUUID();
 }

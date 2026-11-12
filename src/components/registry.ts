@@ -173,6 +173,7 @@ export class ProjectRegistry {
       projectType: "node",
       verificationCommands: ["pnpm lint", "pnpm typecheck", "pnpm test:unit", "pnpm build"],
       conditionalVerification: ["pnpm --filter @scs/api test:coverage"],
+      advisoryCommands: ["pnpm format:check"],
       kiloModel: undefined,
       kiloAgent: undefined,
       taskTimeoutMs: 6 * 60 * 60 * 1000,
