@@ -74,7 +74,7 @@ Add `--json` to any command for structured automation output.
 - [Multi-project registration](docs/multi-project-registration.md) · [Task lifecycle](docs/task-lifecycle.md)
 - [Security model](docs/security-model.md) · [Operations manual](docs/operations-manual.md)
 - [Recovery & troubleshooting](docs/recovery-troubleshooting.md) · [Developer guide](docs/developer-guide.md)
-- [Testing guide](docs/testing-guide.md) · [Release notes](docs/release-notes.md)
+- [Testing guide](docs/testing-guide.md) · [Release notes](docs/release-notes.md) · [E2E test report](docs/e2e-test-report.md)
 
 ## Safety guarantees
 
@@ -86,4 +86,8 @@ Add `--json` to any command for structured automation output.
 
 ## Status
 
-See [release notes](docs/release-notes.md) for what is operational and what requires manual configuration.
+V1 is feature-complete: **131/131 automated tests pass**, and a **real Kilo execution was demonstrated and independently verified** (Stage D). The SCS Platform project is registered and validated.
+
+**Outstanding manual step:** GitHub authentication (`gh auth login`) is not yet completed, so live label bootstrap and live test-issue discovery/reporting are pending. The worker is intentionally **disabled** until you review the security model and enable it explicitly.
+
+See [release notes](docs/release-notes.md) and the [Definition-of-Done test report](docs/e2e-test-report.md) for precisely what is operational and what requires manual configuration.
