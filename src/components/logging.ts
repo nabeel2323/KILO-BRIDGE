@@ -10,17 +10,20 @@ export interface LoggerOptions {
   logsDir: string;
   serviceName?: string;
   enableConsole?: boolean;
+  enableNotifications?: boolean;
 }
 
 export class Logger {
   private readonly logsDir: string;
   private readonly serviceName: string;
   private readonly enableConsole: boolean;
+  private readonly enableNotifications: boolean;
 
   constructor(opts: LoggerOptions) {
     this.logsDir = opts.logsDir;
     this.serviceName = opts.serviceName ?? "kilo-bridge";
     this.enableConsole = opts.enableConsole ?? true;
+    this.enableNotifications = opts.enableNotifications ?? true;
     if (!fs.existsSync(this.logsDir)) {
       fs.mkdirSync(this.logsDir, { recursive: true });
     }
@@ -52,6 +55,7 @@ export class Logger {
 
   // Windows notification (best-effort, non-fatal).
   notify(title: string, body: string): void {
+    if (!this.enableNotifications) return;
     const ps = [
       "Add-Type -AssemblyName System.Windows.Forms",
       `$n = New-Object System.Windows.Forms.NotifyIcon`,

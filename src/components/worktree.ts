@@ -70,8 +70,10 @@ export class WorktreeManager {
   }
 
   async verifyOrigin(): Promise<BridgeResult<string>> {
-    const res = await this.git(["remote", "get-url", "origin"]);
-    if (res.code !== 0) {
+    // Read the stored URL directly: `git remote get-url` expands insteadOf
+    // rewrites, which would mask the configured repository identity.
+    const res = await this.git(["config", "--get", "remote.origin.url"]);
+    if (res.code !== 0 || !res.stdout.trim()) {
       return failResult("origin remote not configured", "NO_ORIGIN");
     }
     return okResult(res.stdout.trim());
