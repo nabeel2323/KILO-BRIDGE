@@ -11,6 +11,7 @@ export interface ReportData {
   issueUrl: string;
   projectId: string;
   executionId: string;
+  attempt: number;
   startTime: string;
   endTime: string;
   kiloVersion?: string;
@@ -39,13 +40,18 @@ export class ReportGenerator {
   }
 
   generate(data: ReportData): BridgeResult<string> {
-    if (!fs.existsSync(this.reportsDir)) {
-      fs.mkdirSync(this.reportsDir, { recursive: true });
+    // One report file per execution attempt. Previous reports are NEVER
+    // overwritten (spec §11); a collision is a hard error.
+    const safeTask = data.taskId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const safeExec = data.executionId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const taskDir = path.join(this.reportsDir, safeTask);
+    const file = path.join(taskDir, `attempt-${data.attempt}-${safeExec}.md`);
+    if (fs.existsSync(file)) {
+      return failResult(`report already exists, refusing to overwrite: ${file}`, "REPORT_EXISTS");
     }
-    const safe = data.taskId.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const file = path.join(this.reportsDir, `${safe}.md`);
     const md = this.renderMarkdown(data);
     try {
+      if (!fs.existsSync(taskDir)) fs.mkdirSync(taskDir, { recursive: true });
       fs.writeFileSync(file, md, "utf8");
       return okResult(file);
     } catch (err) {
@@ -55,6 +61,7 @@ export class ReportGenerator {
 
   renderMarkdown(data: ReportData): string {
     const lines: string[] = [];
+    lines.push(`[kilo-bridge-report]`);
     lines.push(`# Implementation Report — Issue #${data.issueNumber}`);
     lines.push("");
     lines.push("## Summary");
@@ -63,6 +70,7 @@ export class ReportGenerator {
     lines.push(`- **Project:** ${data.projectId}`);
     lines.push(`- **Issue URL:** ${data.issueUrl}`);
     lines.push(`- **Execution ID:** ${data.executionId}`);
+    lines.push(`- **Attempt:** ${data.attempt}`);
     lines.push(`- **Status:** ${data.status}`);
     lines.push(`- **Start:** ${data.startTime}`);
     lines.push(`- **End:** ${data.endTime}`);
@@ -171,6 +179,7 @@ export class ReportGenerator {
     lines.push("");
     lines.push(`- **Project:** ${data.projectId}`);
     lines.push(`- **Execution ID:** ${data.executionId}`);
+    lines.push(`- **Attempt:** ${data.attempt}`);
     lines.push(`- **Status:** ${data.status}`);
     lines.push(`- **Base SHA:** ${data.baseSha ?? "n/a"}`);
     lines.push(`- **Feature branch:** ${data.featureBranch ?? "n/a"}`);
@@ -211,10 +220,14 @@ export class ReportGenerator {
     return ["COMPLETE", "PARTIAL", "BLOCKED", "FAILED"].includes(status);
   }
 
-  shouldBeComplete(results: VerificationRecord[], requiredCount: number): boolean {
-    // Never COMPLETE when required tests failed or were not executed.
-    const failed = results.filter((v) => v.passed === false).length;
-    const notRun = results.filter((v) => v.passed === null || v.passed === undefined).length;
-    return failed === 0 && notRun === 0;
+  // Never COMPLETE when required tests failed or were not executed (spec §10).
+  // Every required command must have a result with passed === true.
+  shouldBeComplete(results: VerificationRecord[], requiredNames: string[]): boolean {
+    for (const name of requiredNames) {
+      const matching = results.filter((r) => r.command === name || r.args.join(" ") === name || `${r.command} ${r.args.join(" ")}`.trim() === name);
+      if (matching.length === 0) return false;
+      if (!matching.every((r) => r.passed === true)) return false;
+    }
+    return true;
   }
 }
