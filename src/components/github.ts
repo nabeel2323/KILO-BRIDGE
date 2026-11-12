@@ -1,9 +1,11 @@
 "use strict";
 
-import { spawn } from "node:child_process";
-import path from "node:path";
 import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import type { LabelName, BridgeResult } from "../types";
+import { okResult, failResult, KILO_READY_MARKER } from "../types";
+import { runProcess } from "./process";
 
 export interface GhAuth {
   authenticated: boolean;
@@ -37,64 +39,81 @@ export interface GitHubProviderOptions {
   owner: string;
   repo: string;
   cwd?: string;
+  ghBin?: string;
+  ghPrefixArgs?: string[];
 }
 
+const DEFAULT_GH_FALLBACK = "C:\\Program Files\\GitHub CLI\\gh.exe";
+
+const LABEL_COLORS: Record<string, { color: string; description: string }> = {
+  "kilo:ready": { color: "0e8a16", description: "Kilo Bridge: task ready for execution" },
+  "kilo:claimed": { color: "fbca04", description: "Kilo Bridge: task claimed by a worker" },
+  "kilo:running": { color: "1d76db", description: "Kilo Bridge: task execution in progress" },
+  "kilo:report-ready": { color: "5319e7", description: "Kilo Bridge: implementation report available" },
+  "kilo:blocked": { color: "d93f0b", description: "Kilo Bridge: task blocked" },
+  "kilo:failed": { color: "b60205", description: "Kilo Bridge: task failed" },
+  "kilo:changes-requested": { color: "f9d0c4", description: "Kilo Bridge: corrections requested" },
+  "kilo:publish-approved": { color: "0075ca", description: "Kilo Bridge: publishing approved by authorized user" },
+  "kilo:published": { color: "006b75", description: "Kilo Bridge: feature branch published as draft PR" },
+  "kilo:done": { color: "c5def5", description: "Kilo Bridge: task closed out" },
+};
+
+// GitHub communication provider. All operations go through authenticated
+// `gh api` / `gh` commands with explicit argument arrays. No tokens are ever
+// read, stored, or logged (spec §5).
 export class GitHubProvider {
   private readonly owner: string;
   private readonly repo: string;
   private readonly cwd: string;
   private readonly ghBin: string;
+  private readonly ghPrefixArgs: string[];
+  private resolvedBin: string | null = null;
 
   constructor(opts: GitHubProviderOptions) {
     this.owner = opts.owner;
     this.repo = opts.repo;
     this.cwd = opts.cwd ?? process.cwd();
-    this.ghBin = process.env.GH_BIN ?? "gh";
+    this.ghBin = opts.ghBin ?? process.env.GH_BIN ?? "gh";
+    this.ghPrefixArgs = opts.ghPrefixArgs ?? [];
   }
 
-  // ------------------------------------------------------------------
-  // Command execution (explicit argument arrays, no shell interpolation)
-  // ------------------------------------------------------------------
-
-  private async run(args: string[], opts: { cwd?: string; input?: string } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
-    return new Promise((resolve) => {
-      const proc = spawn(this.ghBin, args, {
-        cwd: opts.cwd ?? this.cwd,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env },
-        windowsHide: false,
-      });
-
-      let stdout = "";
-      let stderr = "";
-      proc.stdout.on("data", (d) => (stdout += d.toString()));
-      proc.stderr.on("data", (d) => (stderr += d.toString()));
-      if (opts.input) {
-        try {
-          proc.stdin.write(opts.input);
-          proc.stdin.end();
-        } catch {
-          // ignore
-        }
-      }
-      proc.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
-      proc.on("error", (err) =>
-        resolve({ code: 127, stdout, stderr: err.message })
-      );
-    });
+  fullRepo(): string {
+    return `${this.owner}/${this.repo}`;
   }
 
-  private async runJson<T = unknown>(args: string[], opts?: { cwd?: string; input?: string }): Promise<BridgeResult<T>> {
+  private apiPath(suffix: string): string {
+    return `repos/${this.owner}/${this.repo}${suffix}`;
+  }
+
+  private async run(args: string[], opts: { input?: string } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+    const bin = this.resolvedBin ?? this.ghBin;
+    let res = await runProcess(bin, [...this.ghPrefixArgs, ...args], { cwd: this.cwd, input: opts.input, timeoutMs: 120_000 });
+    // gh may be installed but absent from this session's PATH (Windows).
+    if (res.code === 127 && bin === "gh" && this.ghPrefixArgs.length === 0 && fs.existsSync(DEFAULT_GH_FALLBACK)) {
+      this.resolvedBin = DEFAULT_GH_FALLBACK;
+      res = await runProcess(this.resolvedBin, args, { cwd: this.cwd, input: opts.input, timeoutMs: 120_000 });
+    }
+    return res;
+  }
+
+  private classifyError(stderr: string, code: number): string {
+    if (/rate limit|api rate|403|429|secondary rate/i.test(stderr)) return "RATE_LIMITED";
+    if (/401|bad credentials|authentication|not logged/i.test(stderr)) return "GH_NOT_AUTHENTICATED";
+    if (/404|not found/i.test(stderr)) return "NOT_FOUND";
+    return `GH_EXIT_${code}`;
+  }
+
+  private async runJson<T>(args: string[], opts: { input?: string } = {}): Promise<BridgeResult<T>> {
     const res = await this.run(args, opts);
     if (res.code !== 0) {
-      return { ok: false, error: res.stderr.trim() || `gh exited ${res.code}`, code: String(res.code) };
+      return failResult(res.stderr.trim() || `gh exited ${res.code}`, this.classifyError(res.stderr, res.code));
     }
     const text = res.stdout.trim();
-    if (!text) return { ok: true, data: undefined as unknown as T };
+    if (!text) return okResult(undefined as unknown as T);
     try {
-      return { ok: true, data: JSON.parse(text) as T };
+      return okResult(JSON.parse(text) as T);
     } catch (err) {
-      return { ok: false, error: `failed to parse gh JSON output: ${err}`, code: "PARSE_ERROR" };
+      return failResult(`failed to parse gh JSON output: ${err}`, "PARSE_ERROR");
     }
   }
 
@@ -103,20 +122,27 @@ export class GitHubProvider {
   // ------------------------------------------------------------------
 
   async authStatus(): Promise<GhAuth> {
-    // gh auth status returns non-zero when not authenticated
     const res = await this.run(["auth", "status"]);
+    // gh writes auth status to stderr in recent versions; check both streams.
+    const output = res.stdout + "\n" + res.stderr;
     if (res.code === 0) {
-      // Parse the logged in user from stdout like "github.com: Logged in as nabeel2323"
-      const m = res.stdout.match(/Logged in as\s+(\S+)/);
+      const m = output.match(/Logged in as\s+(\S+)/);
       return { authenticated: true, user: m ? m[1] : undefined };
     }
-    return { authenticated: false, error: res.stderr.trim() || "gh not authenticated" };
+    return { authenticated: false, error: output.trim() || "gh not authenticated" };
   }
 
-  async tokenAvailable(): Promise<boolean> {
-    // Do not retrieve or store the token. Just check gh can authenticate.
-    const res = await this.run(["auth", "token"]);
-    return res.code === 0 && res.stdout.trim().length > 0;
+  async getRateLimit(): Promise<BridgeResult<{ remaining: number; limit: number; reset: number }>> {
+    const res = await this.runJson<any>(["api", "rate_limit"]);
+    if (!res.ok) return failResult(res.error!, res.code);
+    const core = res.data?.resources?.core;
+    return okResult({ remaining: core?.remaining ?? -1, limit: core?.limit ?? -1, reset: core?.reset ?? 0 });
+  }
+
+  async getRepo(): Promise<BridgeResult<{ fullName: string; private: boolean; permissions?: Record<string, boolean> }>> {
+    const res = await this.runJson<any>(["api", this.apiPath("")]);
+    if (!res.ok) return failResult(res.error!, res.code);
+    return okResult({ fullName: res.data.full_name, private: res.data.private, permissions: res.data.permissions });
   }
 
   // ------------------------------------------------------------------
@@ -124,117 +150,101 @@ export class GitHubProvider {
   // ------------------------------------------------------------------
 
   async listLabels(): Promise<BridgeResult<string[]>> {
-    const res = await this.runJson<string[]>([
-      "api",
-      "repos/${owner}/${repo}/labels".replace("${owner}", this.owner).replace("${repo}", this.repo),
-      "--paginate",
-      "-t",
-      '.[].name',
-    ]);
-    return res;
+    const res = await this.runJson<any[]>(["api", this.apiPath("/labels?per_page=100"), "--paginate"]);
+    if (!res.ok) return failResult(res.error!, res.code);
+    return okResult((res.data ?? []).map((l) => String(l.name)));
   }
 
-  async ensureLabels(labels: LabelName[]): Promise<BridgeResult<{ created: string[]; exists: string[] }>> {
+  async ensureLabels(labels: readonly LabelName[]): Promise<BridgeResult<{ created: string[]; exists: string[] }>> {
+    const existing = await this.listLabels();
+    if (!existing.ok) return failResult(existing.error!, existing.code);
+    const existingSet = new Set(existing.data!);
     const created: string[] = [];
     const exists: string[] = [];
     for (const label of labels) {
-      // Check existence
-      const check = await this.run([
-        "label",
-        "list",
-        "--repo",
-        `${this.owner}/${this.repo}`,
-        "--search",
-        label,
-        "--json",
-        "name",
-      ]);
-      if (check.code === 0 && check.stdout.trim().length > 0 && check.stdout.includes(label)) {
+      if (existingSet.has(label)) {
         exists.push(label);
         continue;
       }
-      const add = await this.run([
-        "label",
-        "create",
-        label,
-        "--repo",
-        `${this.owner}/${this.repo}`,
-        "--force",
+      const meta = LABEL_COLORS[label] ?? { color: "ededed", description: "Kilo Bridge" };
+      const res = await this.run([
+        "api", "-X", "POST", this.apiPath("/labels"),
+        "-f", `name=${label}`,
+        "-f", `color=${meta.color}`,
+        "-f", `description=${meta.description}`,
       ]);
-      if (add.code !== 0) {
-        return { ok: false, error: `failed to create label ${label}: ${add.stderr.trim()}`, code: "LABEL_CREATE_FAILED" };
+      if (res.code !== 0) {
+        // Race: another process created it meanwhile.
+        if (/already_exists|422/i.test(res.stderr)) {
+          exists.push(label);
+          continue;
+        }
+        return failResult(`failed to create label ${label}: ${res.stderr.trim()}`, "LABEL_CREATE_FAILED");
       }
       created.push(label);
     }
-    return { ok: true, data: { created, exists } };
+    return okResult({ created, exists });
   }
 
-  async addLabels(issueNumber: number, labels: LabelName[]): Promise<BridgeResult<void>> {
-    if (labels.length === 0) return { ok: true };
-    const res = await this.run([
-      "label",
-      "add",
-      String(issueNumber),
-      ...labels,
-      "--repo",
-      `${this.owner}/${this.repo}`,
-    ]);
+  async addLabels(issueNumber: number, labels: readonly LabelName[]): Promise<BridgeResult<void>> {
+    if (labels.length === 0) return okResult();
+    const res = await this.run(
+      ["api", "-X", "POST", this.apiPath(`/issues/${issueNumber}/labels`), "--input", "-"],
+      { input: JSON.stringify({ labels: [...labels] }) }
+    );
     if (res.code !== 0) {
-      return { ok: false, error: res.stderr.trim() || `gh label add exited ${res.code}`, code: "LABEL_ADD_FAILED" };
+      return failResult(res.stderr.trim() || `label add exited ${res.code}`, "LABEL_ADD_FAILED");
     }
-    return { ok: true };
+    return okResult();
   }
 
   async removeLabel(issueNumber: number, label: LabelName): Promise<BridgeResult<void>> {
     const res = await this.run([
-      "label",
-      "remove",
-      String(issueNumber),
-      label,
-      "--repo",
-      `${this.owner}/${this.repo}`,
+      "api", "-X", "DELETE",
+      this.apiPath(`/issues/${issueNumber}/labels/${encodeURIComponent(label)}`),
     ]);
     if (res.code !== 0) {
-      // label may already be absent; treat missing as ok
-      if (res.stderr.includes("not found") || res.stderr.includes("404")) return { ok: true };
-      return { ok: false, error: res.stderr.trim() || `gh label remove exited ${res.code}`, code: "LABEL_REMOVE_FAILED" };
+      if (/not found|404/i.test(res.stderr)) return okResult(); // already absent
+      return failResult(res.stderr.trim() || `label remove exited ${res.code}`, "LABEL_REMOVE_FAILED");
     }
-    return { ok: true };
+    return okResult();
   }
 
   // ------------------------------------------------------------------
-  // Issues
+  // Issues (REST via gh api; PRs are filtered out — spec §5)
   // ------------------------------------------------------------------
 
+  private normalizeIssue(raw: any): GitHubIssue {
+    return {
+      number: Number(raw.number),
+      title: String(raw.title ?? ""),
+      body: String(raw.body ?? ""),
+      state: String(raw.state ?? ""),
+      url: String(raw.url ?? ""),
+      htmlUrl: String(raw.html_url ?? ""),
+      author: String(raw.user?.login ?? ""),
+      createdAt: String(raw.created_at ?? ""),
+      updatedAt: String(raw.updated_at ?? ""),
+      labels: Array.isArray(raw.labels) ? raw.labels.map((l: any) => String(l.name ?? l)) : [],
+      pullRequest: Boolean(raw.pull_request),
+    };
+  }
+
   async listOpenIssues(opts: { labels?: string[]; limit?: number } = {}): Promise<BridgeResult<GitHubIssue[]>> {
-    const args: string[] = [
-      "issue",
-      "list",
-      "--repo",
-      `${this.owner}/${this.repo}`,
-      "--state",
-      "open",
-      "--json",
-      "number,title,body,state,url,htmlUrl,author,createdAt,updatedAt,labels,isPullRequest",
-      "--limit",
-      String(opts.limit ?? 100),
-    ];
-    if (opts.labels && opts.labels.length > 0) {
-      args.push("--label", opts.labels.join(","));
-    }
-    return this.runJson<GitHubIssue[]>(args);
+    const params = new URLSearchParams({ state: "open", per_page: "100" });
+    if (opts.labels && opts.labels.length > 0) params.set("labels", opts.labels.join(","));
+    const res = await this.runJson<any[]>(["api", this.apiPath(`/issues?${params.toString()}`), "--paginate"]);
+    if (!res.ok) return failResult(res.error!, res.code);
+    const issues = (res.data ?? [])
+      .map((r) => this.normalizeIssue(r))
+      .filter((i) => !i.pullRequest); // never trust PRs from the Issues API
+    return okResult(issues.slice(0, opts.limit ?? 100));
   }
 
   async getIssue(issueNumber: number): Promise<BridgeResult<GitHubIssue>> {
-    return this.runJson<GitHubIssue>([
-      "issue",
-      "view",
-      String(issueNumber),
-      "--repo",
-      `${this.owner}/${this.repo}`,
-      "--json",
-      "number,title,body,state,url,htmlUrl,author,createdAt,updatedAt,labels,isPullRequest",
-    ]);
+    const res = await this.runJson<any>(["api", this.apiPath(`/issues/${issueNumber}`)]);
+    if (!res.ok) return failResult(res.error!, res.code);
+    return okResult(this.normalizeIssue(res.data));
   }
 
   // ------------------------------------------------------------------
@@ -242,74 +252,76 @@ export class GitHubProvider {
   // ------------------------------------------------------------------
 
   async listComments(issueNumber: number): Promise<BridgeResult<GitHubComment[]>> {
-    const res = await this.runJson<GitHubComment[]>(
-      [
-        "api",
-        "repos/${owner}/${repo}/issues/${number}/comments".replace("${owner}", this.owner)
-          .replace("${repo}", this.repo)
-          .replace("${number}", String(issueNumber)),
-        "--paginate",
-        "-t",
-        '.[].{id, body, user: {login}, created_at}',
-      ],
-      { cwd: this.cwd }
-    );
-    if (!res.ok || !res.data) return { ok: true, data: [] };
-    const arr = res.data as any[];
-    return {
-      ok: true,
-      data: arr.map((c) => ({
-        id: c.id,
-        body: c.body ?? "",
-        author: c.user?.login ?? "",
-        createdAt: c.created_at ?? "",
-        isBridge: this.isBridgeComment(c.body),
-      })),
-    };
+    const res = await this.runJson<any[]>(["api", this.apiPath(`/issues/${issueNumber}/comments?per_page=100`), "--paginate"]);
+    if (!res.ok) return failResult(res.error!, res.code);
+    const comments = (res.data ?? []).map((c) => ({
+      id: Number(c.id),
+      body: String(c.body ?? ""),
+      author: String(c.user?.login ?? ""),
+      createdAt: String(c.created_at ?? ""),
+      isBridge: this.isBridgeComment(String(c.body ?? "")),
+    }));
+    return okResult(comments);
   }
 
   async addComment(issueNumber: number, body: string): Promise<BridgeResult<number>> {
-    const res = await this.run(
-      [
-        "issue",
-        "comment",
-        String(issueNumber),
-        "--repo",
-        `${this.owner}/${this.repo}`,
-        "--body",
-        body,
-      ],
-      { cwd: this.cwd }
+    // Body via stdin JSON file: no argument-length limits, no interpolation.
+    const res = await this.runJson<any>(
+      ["api", "-X", "POST", this.apiPath(`/issues/${issueNumber}/comments`), "--input", "-"],
+      { input: JSON.stringify({ body }) }
     );
-    if (res.code !== 0) {
-      return { ok: false, error: res.stderr.trim() || `gh issue comment exited ${res.code}`, code: "COMMENT_ADD_FAILED" };
+    if (!res.ok) return failResult(res.error!, res.code);
+    return okResult(Number(res.data?.id ?? -1));
+  }
+
+  // ------------------------------------------------------------------
+  // Pull requests (draft only; never merged by the Bridge)
+  // ------------------------------------------------------------------
+
+  async createDraftPr(opts: { title: string; body: string; head: string; base: string }): Promise<BridgeResult<string>> {
+    const tmp = path.join(os.tmpdir(), `kilo-bridge-pr-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
+    try {
+      fs.writeFileSync(tmp, opts.body, "utf8");
+      const res = await this.run([
+        "pr", "create",
+        "--draft",
+        "--repo", this.fullRepo(),
+        "--head", opts.head,
+        "--base", opts.base,
+        "--title", opts.title,
+        "--body-file", tmp,
+      ]);
+      if (res.code !== 0) {
+        return failResult(res.stderr.trim() || `gh pr create exited ${res.code}`, "PR_CREATE_FAILED");
+      }
+      const url = res.stdout.trim().split(/\r?\n/).pop() ?? "";
+      if (!/^https:\/\//.test(url)) {
+        return failResult(`could not parse PR URL from gh output: ${res.stdout.trim()}`, "PR_URL_PARSE_FAILED");
+      }
+      return okResult(url);
+    } finally {
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
     }
-    // gh issue comment does not return the new comment id reliably; parse if present
-    const m = res.stdout.match(/comment (#?\d+)/i);
-    return { ok: true, data: m ? parseInt(m[1], 10) : -1 };
   }
 
   // ------------------------------------------------------------------
   // Helpers
   // ------------------------------------------------------------------
 
+  // Only the unique machine-readable marker identifies Bridge comments.
+  // Title/body text alone is never trusted (spec §5).
   private isBridgeComment(body: string): boolean {
-    return body.includes("[kilo-bridge-report]") || body.includes("Kilo Bridge");
-  }
-
-  fullRepo(): string {
-    return `${this.owner}/${this.repo}`;
+    return body.includes(KILO_READY_MARKER);
   }
 }
 
 export function ghMissingError(): BridgeResult<never> {
-  return {
-    ok: false,
-    error: "GitHub CLI (gh) is not installed or not on PATH. Install GitHub CLI and authenticate with 'gh auth login'.",
-    code: "GH_NOT_FOUND",
-  };
+  return failResult(
+    "GitHub CLI (gh) is not installed or not on PATH. Install GitHub CLI and authenticate with 'gh auth login'.",
+    "GH_NOT_FOUND"
+  );
 }
 
 export function isGhNotFound(stderr: string): boolean {
-  return /not recognized|not found|no such file|command not found/i.test(stderr);
+  return /not recognized|not found|no such file|command not found|ENOENT/i.test(stderr);
 }
