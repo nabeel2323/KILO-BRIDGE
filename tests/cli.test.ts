@@ -38,6 +38,9 @@ test("cli: init creates db, dirs and config", async () => {
   assert.ok(fs.existsSync(path.join(root, "bridge.config.json")));
   assert.ok(fs.existsSync(path.join(root, "logs")));
   assert.ok(fs.existsSync(path.join(root, "reports")));
+  const projects = await runCli(root, ["projects", "list", "--json"]);
+  assert.equal(projects.code, 0, projects.stderr);
+  assert.deepEqual(JSON.parse(projects.stdout), [], "init must not register an implicit project");
   removeDir(root);
 });
 
@@ -174,7 +177,7 @@ test("cli: doctor prints each check with status", async () => {
   assert.ok(output.includes("bridge.config.json:"), "should list config check");
   assert.ok(output.includes("workerEnabled:"), "should list workerEnabled check");
   assert.ok(output.includes("projects:"), "should list projects check");
-  assert.ok(output.includes("scs-platform project:"), "should list scs-project check");
+  assert.ok(!output.includes("scs-platform"), "doctor must not assume an SCS project");
   removeDir(root);
 });
 
@@ -190,7 +193,7 @@ test("cli: doctor JSON output is parseable", async () => {
   assert.ok(data.checks.some((c: any) => c.name === "kilo"));
   assert.ok(data.checks.some((c: any) => c.name === "sqlite"));
   assert.ok(data.checks.some((c: any) => c.name === "workerEnabled"));
-  assert.ok(data.checks.some((c: any) => c.name === "scs-platform project"));
+  assert.ok(!data.checks.some((c: any) => c.name === "scs-platform project"));
   for (const c of data.checks) {
     assert.ok(["PASS", "FAIL", "WARNING"].includes(c.status));
     assert.ok(c.condition);

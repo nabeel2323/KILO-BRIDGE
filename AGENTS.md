@@ -36,7 +36,7 @@ dist-test/           compiled test output (tsc)
 | `pnpm run build` | Compile TypeScript source to `dist/` |
 | `pnpm run build:test` | Compile test TypeScript to `dist-test/` |
 | `pnpm run test` | Run full test suite (`node --test dist-test/tests/*.test.js`) |
-| `node dist/cli.js init` | Initialize Bridge (db, dirs, config, register SCS) |
+| `node dist/cli.js init` | Initialize Bridge (db, dirs, config) |
 | `node dist/cli.js doctor` | Verify environment and tools |
 | `node dist/cli.js projects list|add|validate|enable|disable|inspect|template` | Project management |
 | `node dist/cli.js github bootstrap|test` | GitHub auth check + label bootstrap |

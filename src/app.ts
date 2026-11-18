@@ -71,7 +71,7 @@ export class KiloBridgeApp {
 
   private _lifecycle!: LifecycleManager;
 
-  async init(bridgeRoot: string, registerScs = true): Promise<BridgeResult<void>> {
+  async init(bridgeRoot: string): Promise<BridgeResult<void>> {
     const dataDir = path.join(bridgeRoot, "data");
     const logsDir = path.join(bridgeRoot, "logs");
     const reportsDir = path.join(bridgeRoot, "reports");
@@ -98,27 +98,6 @@ export class KiloBridgeApp {
       upsertSecurityPolicy: (p: any) => store.upsertSecurityPolicy(p),
     };
     this.ctx.registry = new ProjectRegistry(deps);
-
-    const tasks = store.listTasksByProject("scs-platform");
-    if (registerScs && tasks.length === 0) {
-      const scsConfig: ProjectConfig = {
-        id: "scs-platform",
-        name: "SCS Platform",
-        repository: "test-owner/scs-platform",
-        localPath: "C:\\TAIF\\scs-platform",
-        baseBranch: "develop",
-        releaseBranch: "main",
-        worktreeRoot: "C:\\TAIF\\_kilo-worktrees\\scs-platform",
-        branchPrefix: "ai/kilo",
-        allowedAuthors: ["nabeel2323"],
-        verificationCommands: ["pnpm lint", "pnpm typecheck", "pnpm test:unit", "pnpm build"],
-        advisoryCommands: ["pnpm format:check"],
-        conditionalVerification: [],
-        publishingEnabled: false,
-        state: "active",
-      };
-      this.ctx.registry.add(scsConfig);
-    }
 
     return okResult();
   }
@@ -250,15 +229,6 @@ export class KiloBridgeApp {
       remediation: projects.length === 0
         ? "Run 'kilo-bridge projects add <json>' to register a project."
         : "None required.",
-    });
-
-    const scsProject = this.ctx.registry.get("scs-platform");
-    checks.push({
-      name: "scs-platform project",
-      status: scsProject ? "PASS" : "WARNING",
-      condition: scsProject ? "registered" : "not registered",
-      explanation: scsProject ? "SCS Platform project is registered." : "SCS Platform project is not registered.",
-      remediation: scsProject ? "None required." : "Run 'kilo-bridge init' to register SCS Platform.",
     });
 
     // Execution isolation - granular readiness states.

@@ -28,7 +28,7 @@ function printHelp(): void {
   print("Usage: kilo-bridge <command> [args] [--json]");
   print("");
   print("Commands:");
-  print("  init                           Initialize Bridge (db, dirs, config, register SCS)");
+  print("  init                           Initialize Bridge (db, dirs, config)");
   print("  doctor                         Verify environment and tools");
   print("  configure set <key> <value>    Persist a bridge config key");
   print("  start                          Start the worker (mock mode)");
@@ -80,8 +80,7 @@ async function main(argv: string[]): Promise<number> {
         return 0;
 
       case "init": {
-        const isDefaultRoot = bridgeRoot.replace(/[\\/]+$/, "").toLowerCase() === "c:\\taif\\kilo-bridge";
-        const res = await app.init(bridgeRoot, isDefaultRoot);
+        const res = await app.init(bridgeRoot);
         if (!res.ok) { err(`init failed: ${res.error}`); return 1; }
         if (wantJson) printJson({ ok: true, bridgeRoot });
         else { print("Kilo Bridge initialized."); print(`Bridge root: ${bridgeRoot}`); print("Run 'kilo-bridge doctor' to verify the environment."); }
@@ -89,7 +88,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "doctor": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         const res = await app.doctor({ json: wantJson });
         if (!res.ok) { err(`doctor failed: ${res.error}`); return 1; }
         const data = res.data as { checks: DoctorCheck[]; allOk: boolean; manualExecutionReady: boolean };
@@ -122,7 +121,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "configure": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         if (sub === "set") {
           const key = rest[0];
           const value = rest[1];
@@ -150,7 +149,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "start": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         const res = await app.workerStartContinuous();
         if (!res.ok) { err(`start failed: ${res.error}`); return 1; }
         const data = res.data as { pid: number; projectId?: string };
@@ -160,7 +159,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "stop": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         const res = await app.workerStop();
         if (!res.ok) { err(`stop failed: ${res.error}`); return 1; }
         print("Worker stop requested.");
@@ -168,7 +167,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "status": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         const [projRes, stateRes] = await Promise.all([app.projectsList(), app.workerStatus()]);
         if (!projRes.ok) { err(`status failed: ${projRes.error}`); return 1; }
         if (!stateRes.ok) { err(`status failed: ${stateRes.error}`); return 1; }
@@ -186,7 +185,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "projects": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         if (sub === "list") {
           const res = app.projectsList();
           if (!res.ok) { err(res.error ?? "list failed"); return 1; }
@@ -283,9 +282,10 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "github": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         if (sub === "bootstrap") {
-          const projectId = rest[0] ?? "scs-platform";
+          const projectId = rest[0];
+          if (!projectId) { err("usage: kilo-bridge github bootstrap <project>"); return 1; }
           const res = await app.githubBootstrap(projectId);
           if (!res.ok) { err(`bootstrap failed: ${res.error}`); return 1; }
           const data = res.data as { authenticated: boolean; user?: string; labels: any };
@@ -294,7 +294,8 @@ async function main(argv: string[]): Promise<number> {
           return 0;
         }
         if (sub === "test") {
-          const projectId = rest[0] ?? "scs-platform";
+          const projectId = rest[0];
+          if (!projectId) { err("usage: kilo-bridge github test <project>"); return 1; }
           const res = await app.githubTest(projectId);
           if (!res.ok) { err(`test failed: ${res.error}`); return 1; }
           print(`GitHub authenticated: ${res.data!.authenticated}`);
@@ -305,7 +306,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "tasks": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         const projectId = rest[0] ?? null;
         const status = rest[1] ?? null;
         const res = app.tasksList(projectId, status);
@@ -316,7 +317,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "task": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         if (sub === "execute") {
           const pIdx = args.indexOf("--project");
           const projectId = pIdx >= 0 ? args[pIdx + 1] : undefined;
@@ -354,7 +355,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "logs": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         const id = rest[0];
         if (!id) { err("usage: kilo-bridge logs <id>"); return 1; }
         const res = app.taskLogs(id);
@@ -365,7 +366,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "reports": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         const id = rest[0];
         if (!id) { err("usage: kilo-bridge reports <id>"); return 1; }
         const res = app.taskReports(id);
@@ -376,7 +377,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "worker": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         if (sub === "run") {
           // Internal: spawned by `start` to run continuous polling in a detached process.
           const continuous = args.includes("--continuous");
@@ -461,7 +462,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "integration": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         if (sub === "--help" || sub === "-h" || sub === null) {
           print("Usage: kilo-bridge integration local-kilo [--scenario read|write|edit|search] [--profile smoke|integration-test|normal-coding] [--worktree <path>]");
           print("");
@@ -514,9 +515,10 @@ async function main(argv: string[]): Promise<number> {
         return result.finalStatus === "COMPLETED" ? 0 : 1;
       }
       case "verify": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         const pIdx = args.indexOf("--project");
-        const projectId = pIdx >= 0 ? args[pIdx + 1] : "scs-platform";
+        const projectId = pIdx >= 0 ? args[pIdx + 1] : undefined;
+        if (!projectId) { err("usage: kilo-bridge verify --project <id>"); return 1; }
         const res = await app.verifyProject(projectId);
         if (!res.ok) { err(`verify failed: ${res.error}`); return 1; }
         if (wantJson) printJson(res.data);
@@ -525,7 +527,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "security": {
-        await app.init(bridgeRoot, false);
+        await app.init(bridgeRoot);
         if (sub !== "test") { err("usage: kilo-bridge security test --profile smoke|normal-coding"); return 1; }
         const spIdx = args.indexOf("--profile");
         const profile = spIdx >= 0 ? args[spIdx + 1] : undefined;
@@ -544,7 +546,7 @@ async function main(argv: string[]): Promise<number> {
         print("Usage: kilo-bridge <command> [args] [--json]");
         print("");
         print("Commands:");
-        print("  init                           Initialize Bridge (db, dirs, config, register SCS)");
+        print("  init                           Initialize Bridge (db, dirs, config)");
         print("  doctor                         Verify environment and tools");
         print("  configure set <key> <value>    Persist a bridge config key");
         print("  start                          Start the worker (mock mode)");
