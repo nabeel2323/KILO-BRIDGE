@@ -5,7 +5,7 @@ import path from "node:path";
 import { KiloBridgeApp } from "./app";
 import { Worker } from "./components/worker";
 import { GitHubProvider } from "./components/github";
-import { BridgeConfigSchema, ensureBridgeConfig } from "./config";
+import { BridgeConfigSchema, ensureBridgeConfig, updateBridgeConfig } from "./config";
 import type { WorkerState, ProjectConfig, DoctorCheck } from "./types";
 import { LocalKiloIntegration, type Scenario } from "./components/localKiloIntegration";
 import type { SecurityProfileName } from "./components/security";
@@ -134,13 +134,9 @@ async function main(argv: string[]): Promise<number> {
             "workerEnabled", "githubIntakeEnabled", "githubIntakeAllowedRepositories", "ghBin",
           ];
           if (!allowed.includes(key)) { err(`configure set failed: unknown key ${key}`); return 1; }
-          const file = path.join(bridgeRoot, "bridge.config.json");
-          let cfg: any = {};
-          if (fs.existsSync(file)) try { cfg = JSON.parse(fs.readFileSync(file, "utf8")); } catch { cfg = {}; }
           const numKeys = ["pollIntervalMs", "defaultTaskTimeoutMs"];
           const boolKeys = ["ghEnabled", "kiloEnabled", "workerEnabled", "githubIntakeEnabled"];
           if (key === "ghBin") {
-            // Validate absolute path.
             if (!path.isAbsolute(value)) { err(`configure set failed: ghBin must be an absolute path, got: ${value}`); return 1; }
             if (!fs.existsSync(value)) { err(`configure set failed: ghBin executable not found: ${value}`); return 1; }
           }
@@ -148,29 +144,29 @@ async function main(argv: string[]): Promise<number> {
             err(`configure set failed: ${key} must be true or false`);
             return 1;
           }
+          let parsedValue: unknown;
           if (key === "githubIntakeAllowedRepositories") {
-            let parsed: unknown;
-            try { parsed = JSON.parse(value); } catch {
+            try { parsedValue = JSON.parse(value); } catch {
               err("configure set failed: githubIntakeAllowedRepositories must be a JSON array of owner/repo strings");
               return 1;
             }
-            if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
+            if (!Array.isArray(parsedValue) || !parsedValue.every((entry) => typeof entry === "string")) {
               err("configure set failed: githubIntakeAllowedRepositories must be a JSON array of owner/repo strings");
               return 1;
             }
-            cfg[key] = parsed;
           } else {
-            cfg[key] = numKeys.includes(key) ? Number(value) : boolKeys.includes(key) ? value === "true" : value;
+            parsedValue = numKeys.includes(key) ? Number(value) : boolKeys.includes(key) ? value === "true" : value;
           }
-          const validated = BridgeConfigSchema.safeParse(cfg);
-          if (!validated.success) {
-            const detail = validated.error.issues.map((issue) => issue.message).join("; ");
+          let validated: ReturnType<typeof BridgeConfigSchema.parse>;
+          try {
+            validated = updateBridgeConfig(bridgeRoot, (current) => ({ ...current, [key]: parsedValue }));
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
             err(`configure set failed: ${detail}`);
             return 1;
           }
-          fs.writeFileSync(file, JSON.stringify(validated.data, null, 2), "utf8");
-          if (wantJson) printJson({ ok: true, [key]: (validated.data as any)[key] });
-          else print(`set ${key} = ${JSON.stringify((validated.data as any)[key])}`);
+          if (wantJson) printJson({ ok: true, [key]: (validated as any)[key] });
+          else print(`set ${key} = ${JSON.stringify((validated as any)[key])}`);
           return 0;
         }
         print("Configuration is stored in bridge.config.json under the Bridge directory.");
