@@ -1,0 +1,732 @@
+"use strict";
+
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
+import type { AddressInfo } from "node:net";
+import { ensureBridgeConfig } from "../config";
+import type { SqliteStore } from "../db";
+import type { ProjectRegistry } from "./registry";
+import { CONTROL_CENTER_HTML } from "./controlCenterPage";
+
+const LOOPBACK_HOST = "127.0.0.1";
+const DEFAULT_PORT = 4190;
+const SESSION_COOKIE = "kb.sid";
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const MAX_BODY_BYTES = 64 * 1024;
+const MIN_PASSWORD_LENGTH = 14;
+const MAX_PASSWORD_LENGTH = 256;
+const MAX_TASK_PAGE_SIZE = 200;
+
+interface AuthFile {
+  version: 1;
+  bootstrapTokenHash: string | null;
+  passwordSalt: string | null;
+  passwordHash: string | null;
+  createdAt: string | null;
+}
+
+interface OperatorSession {
+  csrfToken: string;
+  expiresAt: number;
+}
+
+interface LoginWindow {
+  failures: number;
+  windowStartedAt: number;
+  blockedUntil: number;
+}
+
+export interface ControlCenterOptions {
+  bridgeRoot: string;
+  store: SqliteStore;
+  registry: ProjectRegistry;
+  host?: string;
+  port?: number;
+}
+
+export interface ControlCenterStartResult {
+  host: string;
+  port: number;
+  url: string;
+}
+
+function authFilePath(bridgeRoot: string): string {
+  return path.join(bridgeRoot, "data", "control-center-auth.json");
+}
+
+function sha256(value: string): string {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function timingSafeHexEqual(left: string, right: string): boolean {
+  if (!/^[a-f0-9]{64}$/i.test(left) || !/^[a-f0-9]{64}$/i.test(right)) return false;
+  const a = Buffer.from(left, "hex");
+  const b = Buffer.from(right, "hex");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function defaultAuthFile(): AuthFile {
+  return {
+    version: 1,
+    bootstrapTokenHash: null,
+    passwordSalt: null,
+    passwordHash: null,
+    createdAt: null,
+  };
+}
+
+function readAuthFile(file: string): AuthFile {
+  if (!fs.existsSync(file)) return defaultAuthFile();
+  const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Control Center authentication file is invalid.");
+  }
+  const value = parsed as Record<string, unknown>;
+  if (value.version !== 1) throw new Error("Unsupported Control Center authentication file version.");
+  const nullableString = (entry: unknown): string | null =>
+    typeof entry === "string" && entry.length > 0 ? entry : null;
+  return {
+    version: 1,
+    bootstrapTokenHash: nullableString(value.bootstrapTokenHash),
+    passwordSalt: nullableString(value.passwordSalt),
+    passwordHash: nullableString(value.passwordHash),
+    createdAt: nullableString(value.createdAt),
+  };
+}
+
+function writeAuthFile(file: string, value: AuthFile): void {
+  const dir = path.dirname(file);
+  fs.mkdirSync(dir, { recursive: true });
+  const temp = file + "." + process.pid + "." + crypto.randomUUID() + ".tmp";
+  const fd = fs.openSync(temp, "wx", 0o600);
+  try {
+    fs.writeFileSync(fd, JSON.stringify(value, null, 2), "utf8");
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  try {
+    fs.renameSync(temp, file);
+  } catch (error) {
+    try { if (fs.existsSync(temp)) fs.unlinkSync(temp); } catch { /* best effort */ }
+    throw error;
+  }
+}
+
+/**
+ * Creates a one-time first-run token. Only its SHA-256 digest is persisted.
+ * The plain token is returned once so the operator can enter it in the browser.
+ */
+export function createControlCenterSetupToken(bridgeRoot: string): string {
+  const file = authFilePath(path.resolve(bridgeRoot));
+  const current = readAuthFile(file);
+  if (current.passwordHash) {
+    throw new Error("Control Center local authentication is already configured.");
+  }
+  const token = crypto.randomBytes(32).toString("base64url");
+  writeAuthFile(file, {
+    version: 1,
+    bootstrapTokenHash: sha256(token),
+    passwordSalt: null,
+    passwordHash: null,
+    createdAt: null,
+  });
+  return token;
+}
+
+function derivePassword(password: string, salt: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, 64, (error, derived) => {
+      if (error) reject(error);
+      else resolve(derived.toString("hex"));
+    });
+  });
+}
+
+function parseCookies(header: string | undefined): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const pair of (header ?? "").split(";")) {
+    const index = pair.indexOf("=");
+    if (index <= 0) continue;
+    const name = pair.slice(0, index).trim();
+    const value = pair.slice(index + 1).trim();
+    if (!name) continue;
+    try { result[name] = decodeURIComponent(value); } catch { /* ignore malformed cookie */ }
+  }
+  return result;
+}
+
+function isLoopbackAddress(address: string | undefined): boolean {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+function sanitizedText(value: unknown, maxLength = 1000): string {
+  return String(value ?? "")
+    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s,;]+/ig, "$1[REDACTED]")
+    .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*)[^\s,;]+/ig, "$1[REDACTED]")
+    .slice(0, maxLength);
+}
+
+function parseBoundedInteger(value: string | null, fallback: number, min: number, max: number): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+}
+
+export class ControlCenterServer {
+  private readonly bridgeRoot: string;
+  private readonly store: SqliteStore;
+  private readonly registry: ProjectRegistry;
+  private readonly host: string;
+  private port: number;
+  private readonly authPath: string;
+  private server: Server | null = null;
+  private readonly sessions = new Map<string, OperatorSession>();
+  private readonly loginWindows = new Map<string, LoginWindow>();
+
+  constructor(options: ControlCenterOptions) {
+    this.bridgeRoot = path.resolve(options.bridgeRoot);
+    this.store = options.store;
+    this.registry = options.registry;
+    this.host = options.host ?? LOOPBACK_HOST;
+    this.port = options.port ?? DEFAULT_PORT;
+    this.authPath = authFilePath(this.bridgeRoot);
+    if (this.host !== LOOPBACK_HOST) {
+      throw new Error("Control Center must bind to 127.0.0.1; non-loopback binding is prohibited.");
+    }
+    if (!Number.isInteger(this.port) || this.port < 0 || this.port > 65535) {
+      throw new Error("Control Center port must be an integer from 0 to 65535.");
+    }
+  }
+
+  async start(): Promise<ControlCenterStartResult> {
+    if (this.server) throw new Error("Control Center is already running.");
+    const server = createServer((request, response) => {
+      void this.handle(request, response).catch(() => {
+        if (!response.headersSent) this.sendJson(response, 500, { error: "Internal Control Center error." });
+        else response.destroy();
+      });
+    });
+    this.server = server;
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error): void => {
+        server.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = (): void => {
+        server.off("error", onError);
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(this.port, this.host);
+    });
+    const address = server.address() as AddressInfo;
+    this.port = address.port;
+    return {
+      host: this.host,
+      port: this.port,
+      url: "http://" + this.host + ":" + this.port + "/",
+    };
+  }
+
+  async close(): Promise<void> {
+    this.sessions.clear();
+    if (!this.server) return;
+    const server = this.server;
+    this.server = null;
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+
+  private expectedHost(): string {
+    return this.host + ":" + this.port;
+  }
+
+  private setSecurityHeaders(response: ServerResponse, nonce?: string): void {
+    const scriptPolicy = nonce ? "'nonce-" + nonce + "'" : "'none'";
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader("X-Frame-Options", "DENY");
+    response.setHeader("Referrer-Policy", "no-referrer");
+    response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; " +
+      "form-action 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src " + scriptPolicy
+    );
+  }
+
+  private sendJson(response: ServerResponse, status: number, payload: unknown): void {
+    this.setSecurityHeaders(response);
+    response.statusCode = status;
+    response.setHeader("Content-Type", "application/json; charset=utf-8");
+    response.end(JSON.stringify(payload));
+  }
+
+  private sendHtml(response: ServerResponse): void {
+    const nonce = crypto.randomBytes(18).toString("base64");
+    const html = CONTROL_CENTER_HTML.replace(/__CSP_NONCE__/g, nonce);
+    this.setSecurityHeaders(response, nonce);
+    response.statusCode = 200;
+    response.setHeader("Content-Type", "text/html; charset=utf-8");
+    response.end(html);
+  }
+
+  private async readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+    const contentType = String(request.headers["content-type"] ?? "").toLowerCase();
+    if (!contentType.startsWith("application/json")) {
+      throw Object.assign(new Error("Content-Type must be application/json."), { statusCode: 415 });
+    }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buffer.length;
+      if (total > MAX_BODY_BYTES) {
+        throw Object.assign(new Error("Request body exceeds the configured size limit."), { statusCode: 413 });
+      }
+      chunks.push(buffer);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      throw Object.assign(new Error("Request body is not valid JSON."), { statusCode: 400 });
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw Object.assign(new Error("Request body must be a JSON object."), { statusCode: 400 });
+    }
+    return parsed as Record<string, unknown>;
+  }
+
+  private validateOrigin(request: IncomingMessage): boolean {
+    const origin = request.headers.origin;
+    return typeof origin === "string" && origin === "http://" + this.expectedHost();
+  }
+
+  private getSession(request: IncomingMessage): { id: string; session: OperatorSession } | null {
+    const id = parseCookies(request.headers.cookie)[SESSION_COOKIE];
+    if (!id) return null;
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    if (session.expiresAt <= Date.now()) {
+      this.sessions.delete(id);
+      return null;
+    }
+    return { id, session };
+  }
+
+  private createSession(response: ServerResponse): { csrfToken: string } {
+    const id = crypto.randomBytes(32).toString("base64url");
+    const csrfToken = crypto.randomBytes(32).toString("base64url");
+    this.sessions.set(id, { csrfToken, expiresAt: Date.now() + SESSION_TTL_MS });
+    response.setHeader(
+      "Set-Cookie",
+      SESSION_COOKIE + "=" + encodeURIComponent(id) + "; HttpOnly; SameSite=Strict; Path=/; Max-Age=" + Math.floor(SESSION_TTL_MS / 1000)
+    );
+    return { csrfToken };
+  }
+
+  private clearSessionCookie(response: ServerResponse): void {
+    response.setHeader("Set-Cookie", SESSION_COOKIE + "=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+  }
+
+  private validateCsrf(request: IncomingMessage, session: OperatorSession): boolean {
+    const token = request.headers["x-csrf-token"];
+    if (typeof token !== "string" || token.length !== session.csrfToken.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(session.csrfToken));
+  }
+
+  private loginWindowKey(request: IncomingMessage): string {
+    return request.socket.remoteAddress ?? "unknown";
+  }
+
+  private isLoginBlocked(request: IncomingMessage): boolean {
+    const key = this.loginWindowKey(request);
+    const entry = this.loginWindows.get(key);
+    if (!entry) return false;
+    if (entry.blockedUntil > Date.now()) return true;
+    if (Date.now() - entry.windowStartedAt > 15 * 60 * 1000) this.loginWindows.delete(key);
+    return false;
+  }
+
+  private recordLoginFailure(request: IncomingMessage): void {
+    const key = this.loginWindowKey(request);
+    const now = Date.now();
+    const current = this.loginWindows.get(key);
+    const entry = !current || now - current.windowStartedAt > 15 * 60 * 1000
+      ? { failures: 0, windowStartedAt: now, blockedUntil: 0 }
+      : current;
+    entry.failures++;
+    if (entry.failures >= 5) entry.blockedUntil = now + 60 * 1000;
+    this.loginWindows.set(key, entry);
+  }
+
+  private clearLoginFailures(request: IncomingMessage): void {
+    this.loginWindows.delete(this.loginWindowKey(request));
+  }
+
+  private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) {
+      this.sendJson(response, 403, { error: "Loopback access only." });
+      return;
+    }
+    if (request.headers.host?.toLowerCase() !== this.expectedHost().toLowerCase()) {
+      this.sendJson(response, 400, { error: "Invalid Host header." });
+      return;
+    }
+    const method = request.method ?? "GET";
+    if (method !== "GET" && method !== "POST") {
+      response.setHeader("Allow", "GET, POST");
+      this.sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    const url = new URL(request.url ?? "/", "http://" + this.expectedHost());
+    const route = url.pathname;
+
+    if (route === "/" && method === "GET") {
+      this.sendHtml(response);
+      return;
+    }
+    if (route === "/api/auth/status" && method === "GET") {
+      const auth = readAuthFile(this.authPath);
+      this.sendJson(response, 200, { configured: Boolean(auth.passwordHash) });
+      return;
+    }
+
+    const unauthenticatedPost = route === "/api/auth/setup" || route === "/api/auth/login";
+    if (method === "POST" && !this.validateOrigin(request)) {
+      this.sendJson(response, 403, { error: "Request Origin is not allowed." });
+      return;
+    }
+
+    if (unauthenticatedPost) {
+      const body = await this.readJsonBody(request);
+      if (route === "/api/auth/setup") {
+        await this.handleSetup(request, response, body);
+        return;
+      }
+      await this.handleLogin(request, response, body);
+      return;
+    }
+
+    const active = this.getSession(request);
+    if (!active) {
+      this.sendJson(response, 401, { error: "Authentication required." });
+      return;
+    }
+    if (method === "POST" && !this.validateCsrf(request, active.session)) {
+      this.sendJson(response, 403, { error: "CSRF token is missing or invalid." });
+      return;
+    }
+
+    if (route === "/api/session" && method === "GET") {
+      this.sendJson(response, 200, { user: "local-operator", csrfToken: active.session.csrfToken, expiresAt: new Date(active.session.expiresAt).toISOString() });
+      return;
+    }
+    if (route === "/api/auth/logout" && method === "POST") {
+      this.sessions.delete(active.id);
+      this.clearSessionCookie(response);
+      this.store.insertAudit({ actor: "local-operator", action: "control_center.logout" });
+      this.sendJson(response, 200, { ok: true });
+      return;
+    }
+    if (route === "/api/dashboard" && method === "GET") {
+      this.sendJson(response, 200, this.dashboard());
+      return;
+    }
+    if (route === "/api/projects" && method === "GET") {
+      this.sendJson(response, 200, this.projectsReadModel());
+      return;
+    }
+    if (route === "/api/tasks" && method === "GET") {
+      const limit = parseBoundedInteger(url.searchParams.get("limit"), 100, 1, MAX_TASK_PAGE_SIZE);
+      const offset = parseBoundedInteger(url.searchParams.get("offset"), 0, 0, 1000000);
+      this.sendJson(response, 200, { tasks: this.taskListReadModel(limit, offset), limit, offset });
+      return;
+    }
+    if (route.startsWith("/api/tasks/") && method === "GET") {
+      const id = decodeURIComponent(route.slice("/api/tasks/".length));
+      const detail = this.taskDetailReadModel(id);
+      if (!detail) {
+        this.sendJson(response, 404, { error: "Task not found." });
+        return;
+      }
+      this.sendJson(response, 200, detail);
+      return;
+    }
+    if (route === "/api/intake-claims" && method === "GET") {
+      this.sendJson(response, 200, { claims: this.claimReadModel() });
+      return;
+    }
+    if (route === "/api/audit" && method === "GET") {
+      this.sendJson(response, 200, { events: this.auditReadModel() });
+      return;
+    }
+    if (route === "/api/settings" && method === "GET") {
+      const config = ensureBridgeConfig(this.bridgeRoot);
+      const worker = this.workerReadModel();
+      this.sendJson(response, 200, {
+        gates: {
+          workerEnabled: config.workerEnabled,
+          githubIntakeEnabled: config.githubIntakeEnabled,
+          githubIntakeAllowedRepositories: config.githubIntakeAllowedRepositories,
+        },
+        workerRunning: worker.running,
+        intakeRuntimeAvailable: false,
+      });
+      return;
+    }
+
+    if (method === "POST") {
+      // State-changing project and configuration APIs are intentionally withheld
+      // until their authorization/audit policy and the isolated dispatcher exist.
+      const body = await this.readJsonBody(request);
+      void body;
+      this.sendJson(response, 409, { error: "This operation is not available until the audited Control Center settings API is implemented." });
+      return;
+    }
+    this.sendJson(response, 404, { error: "Route not found." });
+  }
+
+  private async handleSetup(
+    request: IncomingMessage,
+    response: ServerResponse,
+    body: Record<string, unknown>
+  ): Promise<void> {
+    const auth = readAuthFile(this.authPath);
+    if (auth.passwordHash) {
+      this.sendJson(response, 409, { error: "Local operator account is already configured." });
+      return;
+    }
+    const token = typeof body.token === "string" ? body.token : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    if (!auth.bootstrapTokenHash || !timingSafeHexEqual(auth.bootstrapTokenHash, sha256(token))) {
+      this.recordLoginFailure(request);
+      this.sendJson(response, 401, { error: "Invalid or expired setup token." });
+      return;
+    }
+    if (password.length < MIN_PASSWORD_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+      this.sendJson(response, 400, { error: "Password must be 14 to 256 characters long." });
+      return;
+    }
+    const salt = crypto.randomBytes(16).toString("hex");
+    const passwordHash = await derivePassword(password, salt);
+    writeAuthFile(this.authPath, {
+      version: 1,
+      bootstrapTokenHash: null,
+      passwordSalt: salt,
+      passwordHash,
+      createdAt: new Date().toISOString(),
+    });
+    this.clearLoginFailures(request);
+    const session = this.createSession(response);
+    this.store.insertAudit({ actor: "local-operator", action: "control_center.setup" });
+    this.sendJson(response, 201, { ok: true, csrfToken: session.csrfToken });
+  }
+
+  private async handleLogin(
+    request: IncomingMessage,
+    response: ServerResponse,
+    body: Record<string, unknown>
+  ): Promise<void> {
+    if (this.isLoginBlocked(request)) {
+      this.sendJson(response, 429, { error: "Too many failed sign-in attempts. Try again in one minute." });
+      return;
+    }
+    const auth = readAuthFile(this.authPath);
+    const password = typeof body.password === "string" ? body.password : "";
+    if (!auth.passwordHash || !auth.passwordSalt || password.length > MAX_PASSWORD_LENGTH) {
+      this.recordLoginFailure(request);
+      this.sendJson(response, 401, { error: "Invalid sign-in details." });
+      return;
+    }
+    const candidate = await derivePassword(password, auth.passwordSalt);
+    if (!timingSafeHexEqual(candidate, auth.passwordHash)) {
+      this.recordLoginFailure(request);
+      this.sendJson(response, 401, { error: "Invalid sign-in details." });
+      return;
+    }
+    this.clearLoginFailures(request);
+    const session = this.createSession(response);
+    this.store.insertAudit({ actor: "local-operator", action: "control_center.login" });
+    this.sendJson(response, 200, { ok: true, csrfToken: session.csrfToken });
+  }
+
+  private workerReadModel(): { running: boolean; pid: number | null; heartbeat: string | null } {
+    const file = path.join(this.bridgeRoot, "data", "worker.lock");
+    try {
+      const value = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+      const pid = Number(value.pid);
+      const heartbeat = typeof value.heartbeat === "string" ? value.heartbeat : null;
+      const age = heartbeat ? Date.now() - new Date(heartbeat).getTime() : Number.POSITIVE_INFINITY;
+      return {
+        running: Number.isSafeInteger(pid) && pid > 0 && age >= -30_000 && age < 30 * 60 * 1000,
+        pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null,
+        heartbeat,
+      };
+    } catch {
+      return { running: false, pid: null, heartbeat: null };
+    }
+  }
+
+  private dashboard(): Record<string, unknown> {
+    const config = ensureBridgeConfig(this.bridgeRoot);
+    const projects = this.registry.list();
+    const tasks = this.taskListReadModel(50, 0);
+    const claims = this.claimReadModel();
+    const taskIds = tasks.map((task) => task.id);
+    let activeExecutions = 0;
+    for (const taskId of taskIds) {
+      activeExecutions += this.store.listExecutions(taskId).filter((execution) => execution.status === "RUNNING").length;
+    }
+    const worker = this.workerReadModel();
+    return {
+      generatedAt: new Date().toISOString(),
+      gates: {
+        workerEnabled: config.workerEnabled,
+        githubIntakeEnabled: config.githubIntakeEnabled,
+      },
+      services: {
+        worker: worker,
+        intake: {
+          available: false,
+          running: false,
+          reason: "The dedicated intake service is not connected to a production-isolated task dispatcher yet.",
+        },
+      },
+      counts: {
+        projects: projects.length,
+        tasksReturned: tasks.length,
+        intakeClaims: claims.filter((claim) => ["CLAIMED", "TASK_CREATED", "DISPATCHING", "RUNNING", "RECONCILIATION_REQUIRED"].includes(String(claim.status))).length,
+        activeExecutions,
+      },
+      recentTasks: tasks.slice(0, 12),
+    };
+  }
+
+  private projectsReadModel(): Record<string, unknown> {
+    return {
+      projects: this.registry.list().map(({ config, state }) => ({
+        id: config.id,
+        name: config.name,
+        repository: config.repository,
+        state,
+        allowedAuthors: config.allowedAuthors,
+      })),
+    };
+  }
+
+  private taskListReadModel(limit: number, offset: number): Array<Record<string, unknown>> {
+    return this.store.listTasks(limit, offset).map((task) => ({
+      id: task.id,
+      projectId: task.projectId,
+      issueNumber: task.issueNumber,
+      issueUrl: task.issueUrl,
+      title: task.title,
+      author: task.author,
+      status: task.status,
+      attempt: task.attempt,
+      executionId: task.executionId,
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+    }));
+  }
+
+  private taskDetailReadModel(id: string): Record<string, unknown> | null {
+    const task = this.store.getTask(id);
+    if (!task) return null;
+    const executions = this.store.listExecutions(id);
+    const verifications = executions.flatMap((execution) =>
+      this.store.listVerifications(execution.id).map((verification) => ({
+        id: verification.id,
+        executionId: verification.executionId,
+        name: verification.name,
+        passed: verification.passed,
+        exitCode: verification.exitCode,
+        durationMs: verification.durationMs,
+        startTime: verification.startTime,
+        endTime: verification.endTime,
+      }))
+    );
+    return {
+      task: {
+        id: task.id,
+        projectId: task.projectId,
+        issueNumber: task.issueNumber,
+        issueUrl: task.issueUrl,
+        title: task.title,
+        author: task.author,
+        body: task.body,
+        status: task.status,
+        attempt: task.attempt,
+        executionId: task.executionId,
+        featureBranch: task.featureBranch,
+        leaseExpiresAt: task.leaseExpiresAt,
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt,
+      },
+      transitions: this.store.listTransitions(id).map((transition) => ({
+        fromStatus: transition.fromStatus,
+        toStatus: transition.toStatus,
+        actor: transition.actor,
+        reason: sanitizedText(transition.reason, 300),
+        createdAt: transition.createdAt,
+      })),
+      executions: executions.map((execution) => ({
+        id: execution.id,
+        status: execution.status,
+        attempt: execution.attempt,
+        startTime: execution.startTime,
+        endTime: execution.endTime,
+        exitCode: execution.exitCode,
+        durationMs: execution.durationMs,
+        kiloVersion: execution.kiloVersion,
+        model: execution.kiloModel,
+        agent: execution.kiloAgent,
+        errorMessage: sanitizedText(execution.errorMessage, 500),
+      })),
+      verifications,
+      reports: this.store.getReports(id).map((report) => ({
+        id: report.id,
+        executionId: report.executionId,
+        status: report.status,
+        issueCommentId: report.issueCommentId,
+        postedAt: report.postedAt,
+        createdAt: report.createdAt,
+      })),
+    };
+  }
+
+  private claimReadModel(): Array<Record<string, unknown>> {
+    return this.store.listGitHubIntakeClaims().slice(0, 200).map((claim) => ({
+      id: claim.id,
+      repositoryFullName: claim.repositoryFullName,
+      issueNumber: claim.issueNumber,
+      assignmentGeneration: claim.assignmentGeneration,
+      projectId: claim.projectId,
+      taskId: claim.taskId,
+      status: claim.status,
+      updatedAt: claim.updatedAt,
+      lastError: sanitizedText(claim.lastError, 500),
+    }));
+  }
+
+  private auditReadModel(): Array<Record<string, unknown>> {
+    return this.store.listAudit().slice(-200).reverse().map((event) => ({
+      projectId: event.projectId,
+      actor: event.actor,
+      action: event.action,
+      createdAt: event.createdAt,
+    }));
+  }
+}
