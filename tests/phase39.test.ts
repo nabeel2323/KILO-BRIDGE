@@ -134,13 +134,14 @@ test("phase39: doctor returns executionIsolationLevel WORKTREE_ONLY", async () =
   }
 });
 
-test("phase39: detectIsolationCapabilities reports WINDOWS_SANDBOX available", async () => {
+test("phase39: detectIsolationCapabilities reports host-dependent WINDOWS_SANDBOX availability", async () => {
   const { app, cleanup } = await setupApp();
   try {
     const caps = detectIsolationCapabilities();
     const sandbox = caps.find((c) => c.backend === "WINDOWS_SANDBOX");
     assert.ok(sandbox, "WINDOWS_SANDBOX capability entry must exist");
-    assert.equal(sandbox.available, true);
+    assert.equal(typeof sandbox.available, "boolean");
+    assert.equal(sandbox.provisioned, false, "capability discovery must not imply operator provisioning");
   } finally {
     cleanup();
   }

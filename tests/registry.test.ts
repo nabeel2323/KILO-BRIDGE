@@ -116,24 +116,14 @@ test("registry: laravel template does not auto-install packages", () => {
   assert.ok(!tpl.verificationCommands!.some((c) => /install/i.test(c)));
 });
 
-test("registry: scsPlatform preset matches spec", () => {
-  const scs = ProjectRegistry.scsPlatform();
-  assert.equal(scs.id, "scs-platform");
-  assert.equal(scs.repository, "nabeel2323/scs-platform");
-  assert.equal(scs.baseBranch, "develop");
-  assert.equal(scs.releaseBranch, "main");
-  assert.deepEqual(scs.allowedAuthors, ["nabeel2323"]);
-  assert.deepEqual(scs.verificationCommands, ["pnpm lint", "pnpm typecheck", "pnpm test:unit", "pnpm build"]);
-  assert.deepEqual(scs.advisoryCommands, ["pnpm format:check"]);
-  assert.deepEqual(scs.conditionalVerification, ["pnpm --filter @scs/api test:coverage"]);
-  assert.equal(scs.publishingEnabled, false);
-});
-
 test("registry: example project files are valid", () => {
   const { registry } = makeRegistry();
   const dir = path.join(__dirname, "..", "..", "examples", "projects");
   const files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
-  assert.ok(files.length >= 6);
+  assert.ok(files.length >= 5);
+  for (const expected of ["node.json", "laravel.json", "django.json", "odoo.json", "flutter.json"]) {
+    assert.ok(files.includes(expected), `expected generic project example ${expected}`);
+  }
   for (const f of files) {
     const input = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
     const r = registry.validate(input);

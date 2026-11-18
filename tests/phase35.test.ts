@@ -97,21 +97,21 @@ test("phase35: buildEffectiveKiloConfig both profiles deny external_directory", 
   const mgr = new SecurityManager("test-project", path.join(dir, "worktrees"), dir);
   const smoke = mgr.buildEffectiveKiloConfig("smoke");
   const normal = mgr.buildEffectiveKiloConfig("normal-coding");
-  assert.equal(smoke.permission.external_directory, "deny", "smoke must deny external_directory");
-  assert.equal(normal.permission.external_directory, "deny", "normal-coding must deny external_directory");
+  assert.equal(smoke.permission.external_directory, undefined, "external-directory access is Bridge-enforced");
+  assert.equal(normal.permission.external_directory, undefined, "external-directory access is Bridge-enforced");
   removeDir(dir);
 });
 
-test("phase35: buildEffectiveKiloConfig smoke allows only write", () => {
+test("phase35: buildEffectiveKiloConfig smoke denies read and write", () => {
   const dir = makeTempDir("kilo-p35-");
   const mgr = new SecurityManager("test-project", path.join(dir, "worktrees"), dir);
   const smoke = mgr.buildEffectiveKiloConfig("smoke");
-  assert.equal(smoke.permission.write, "allow");
+  assert.equal(smoke.permission.write, "deny");
   assert.equal(smoke.permission.read, "deny");
   assert.equal(smoke.permission.glob, "deny");
   assert.equal(smoke.permission.grep, "deny");
   assert.equal(smoke.permission.edit, "deny");
-  assert.equal(smoke.permission.apply_patch, "deny");
+  assert.equal(smoke.permission.apply_patch, undefined);
   removeDir(dir);
 });
 
@@ -124,20 +124,20 @@ test("phase35: buildEffectiveKiloConfig normal-coding allows read/edit/write/pat
   assert.equal(normal.permission.grep, "allow");
   assert.equal(normal.permission.edit, "allow");
   assert.equal(normal.permission.write, "allow");
-  assert.equal(normal.permission.apply_patch, "allow");
+  assert.equal(normal.permission.apply_patch, undefined);
   removeDir(dir);
 });
 
 test("phase35: mandatory restrictions cannot be overridden by profile", () => {
   const dir = makeTempDir("kilo-p35-");
   const mgr = new SecurityManager("test-project", path.join(dir, "worktrees"), dir);
-  // Even though smoke allows write, bash and external_directory are mandatory denies.
+  // Bash is a mandatory Kilo denial; external paths are denied by Bridge path checks.
   const smoke = mgr.buildEffectiveKiloConfig("smoke");
   assert.equal(smoke.permission.bash, "deny");
-  assert.equal(smoke.permission.external_directory, "deny");
+  assert.equal(smoke.permission.external_directory, undefined);
   const normal = mgr.buildEffectiveKiloConfig("normal-coding");
   assert.equal(normal.permission.bash, "deny");
-  assert.equal(normal.permission.external_directory, "deny");
+  assert.equal(normal.permission.external_directory, undefined);
   removeDir(dir);
 });
 
@@ -179,7 +179,7 @@ test("phase35: isPathWithinAllowedRoots prevents path escape", () => {
   const allowedRoots = [dir, path.join(dir, "worktrees")];
   assert.equal(mgr.isPathWithinAllowedRoots(path.join(dir, "safe-file.json"), allowedRoots), true);
   assert.equal(mgr.isPathWithinAllowedRoots(path.join(dir, "worktrees", "wt", ".kilo", "kilo.jsonc"), allowedRoots), true);
-  assert.equal(mgr.isPathWithinAllowedRoots("C:\\TAIF\\scs-platform\\package.json", allowedRoots), false);
+  assert.equal(mgr.isPathWithinAllowedRoots("C:\\TAIF\\external-project\\package.json", allowedRoots), false);
   assert.equal(mgr.isPathWithinAllowedRoots(path.join(dir, "..", "escape.txt"), allowedRoots), false);
   removeDir(dir);
 });
@@ -269,11 +269,11 @@ test("phase35: no automatic paid-model fallback - adapter works without model sp
   removeDir(dir);
 });
 
-test("phase35: real SCS repository path is not accepted by test harness fixtures", () => {
+test("phase35: external repository path is not accepted by test harness fixtures", () => {
   const dir = makeTempDir("kilo-p35-");
   const mgr = new SecurityManager("test-project", path.join(dir, "worktrees"), dir);
-  const scsPath = "C:\\TAIF\\scs-platform\\package.json";
-  assert.equal(mgr.isPathWithinAllowedRoots(scsPath, [dir, path.join(dir, "worktrees")]), false, "SCS path must not be within allowed fixture roots");
+  const externalPath = "C:\\TAIF\\external-project\\package.json";
+  assert.equal(mgr.isPathWithinAllowedRoots(externalPath, [dir, path.join(dir, "worktrees")]), false, "external path must not be within allowed fixture roots");
   removeDir(dir);
 });
 

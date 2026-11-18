@@ -73,6 +73,8 @@ async function setupAppWithFixtures(
   registry.add(config as any);
 
   const app = new KiloBridgeApp();
+  // Fixture-backed task tests use a fake Kilo executor and do not require the native CLI.
+  (app as any).verifyKiloConfig = async () => ({ ok: true });
   (app as any).initialized = true;
   (app as any)._lifecycle = new LifecycleManager({
     getTask: (id) => store.getTask(id),

@@ -21,7 +21,7 @@ test("security: generated kilo.json passes denial assertions", () => {
   const config = JSON.parse(fs.readFileSync(path.join(wt, "kilo.json"), "utf8"));
   assert.deepEqual(findMissingDenials(config), []);
   assert.equal(config.permission.bash, "deny");
-  assert.equal(config.permission.external_directory, "deny");
+  assert.equal(config.permission.external_directory, undefined, "external paths are enforced by Bridge path guards, not Kilo tool permissions");
   assert.equal(config.permission.read, "allow");
   assert.equal(config.permission.write, "allow");
   removeDir(dir);
@@ -89,7 +89,7 @@ test("security: path traversal and external paths rejected", () => {
   assert.equal(mgr.isPathWithinWorktree(wt, "..\\..\\windows\\system32"), false);
   assert.equal(mgr.isPathWithinWorktree(wt, "../../etc/passwd"), false);
   assert.equal(mgr.isPathWithinWorktree(wt, "C:\\Windows\\system32"), false);
-  assert.equal(mgr.isPathWithinWorktree(wt, "C:\\TAIF\\scs-platform\\package.json"), false);
+  assert.equal(mgr.isPathWithinWorktree(wt, "C:\\TAIF\\external-project\\package.json"), false);
   // Case-insensitive containment on Windows.
   assert.equal(mgr.isPathWithinWorktree(wt, wt.toUpperCase() + "\\src\\x.ts"), true);
   removeDir(dir);
@@ -142,7 +142,7 @@ test("security: project kilo config is deny-by-default", () => {
   const mgr = makeManager(dir);
   const config = mgr.buildKiloProjectConfig();
   assert.equal(config.permission.bash, "deny");
-  assert.equal(config.permission.external_directory, "deny");
+  assert.equal(config.permission.external_directory, undefined, "external paths are enforced by Bridge path guards, not Kilo tool permissions");
   assert.equal(config.permission.read, "allow");
   assert.equal(config.permission.edit, "allow");
   assert.equal(config.permission.write, "allow");
@@ -169,7 +169,7 @@ test("security: automation kilo config is deny-by-default", () => {
   const mgr = makeManager(dir);
   const config = mgr.buildKiloAutomationConfig();
   assert.equal(config.permission.bash, "deny");
-  assert.equal(config.permission.external_directory, "deny");
+  assert.equal(config.permission.external_directory, undefined, "external paths are enforced by Bridge path guards, not Kilo tool permissions");
   assert.equal(config.permission.read, "allow");
   assert.equal(config.permission.glob, "allow");
   assert.equal(config.permission.edit, "allow");
@@ -187,14 +187,14 @@ test("security: findMissingDenials detects missing bash denial", () => {
   assert.ok(missing.some((m) => m.includes('permission.bash = "deny"')), "missing bash denial");
 });
 
-test("security: findMissingDenials detects missing external_directory denial", () => {
-  const config: any = {
-    permission: {
-      bash: "deny",
-    },
-  };
-  const missing = findMissingDenials(config);
-  assert.ok(missing.some((m) => m.includes('permission.external_directory = "deny"')), "missing external_directory denial");
+test("security: Bridge path guard denies external paths independently of Kilo permissions", () => {
+  const dir = makeTempDir("kilo-sec-");
+  const mgr = makeManager(dir);
+  const worktree = path.join(dir, "worktree");
+  assert.equal(mgr.isExternalDirectoryAccessDenied("..\\outside.txt", worktree), true);
+  assert.equal(mgr.isExternalDirectoryAccessDenied("src\\inside.txt", worktree), false);
+  assert.deepEqual(findMissingDenials({ permission: { bash: "deny" } }), []);
+  removeDir(dir);
 });
 
 test("security: isCommandDenied blocks injection attempts", () => {
@@ -221,8 +221,8 @@ test("security: e2e-smoke config allows only write", () => {
   const dir = makeTempDir("kilo-sec-");
   const mgr = makeManager(dir);
   const config = mgr.buildKiloE2ESmokeConfig();
-  // Only write is allowed
-  assert.equal(config.permission.write, "allow");
+  // Smoke denies both read and write; this avoids using write as an indirect source-exfiltration path.
+  assert.equal(config.permission.write, "deny");
   // Everything else denied
   assert.equal(config.permission.read, "deny");
   assert.equal(config.permission.glob, "deny");
@@ -230,7 +230,7 @@ test("security: e2e-smoke config allows only write", () => {
   assert.equal(config.permission.edit, "deny");
   assert.equal(config.permission.bash, "deny");
   assert.equal(config.permission.lsp, "deny");
-  assert.equal(config.permission.external_directory, "deny");
+  assert.equal(config.permission.external_directory, undefined, "external paths are enforced by Bridge path guards, not Kilo tool permissions");
   removeDir(dir);
 });
 
@@ -259,10 +259,10 @@ test("security: normal coding config allows read/edit/write, denies bash", () =>
   assert.equal(config.permission.grep, "allow");
   assert.equal(config.permission.edit, "allow");
   assert.equal(config.permission.write, "allow");
-  assert.equal(config.permission.apply_patch, "allow");
+  assert.equal(config.permission.apply_patch, undefined, "apply_patch is unsupported by the installed Kilo version");
   // Denied
   assert.equal(config.permission.bash, "deny");
-  assert.equal(config.permission.external_directory, "deny");
+  assert.equal(config.permission.external_directory, undefined, "external paths are enforced by Bridge path guards, not Kilo tool permissions");
   removeDir(dir);
 });
 
@@ -290,8 +290,8 @@ test("security: smoke and normal-coding profiles are different", () => {
   // Smoke denies read, normal allows it
   assert.equal(smoke.permission.read, "deny");
   assert.equal(normal.permission.read, "allow");
-  // Smoke denies write? No, smoke allows write
-  assert.equal(smoke.permission.write, "allow");
+  // Smoke denies write because it also denies read; normal coding permits write.
+  assert.equal(smoke.permission.write, "deny");
   assert.equal(normal.permission.write, "allow");
   // Both deny bash
   assert.equal(smoke.permission.bash, "deny");
@@ -312,6 +312,6 @@ test("security: normal coding profile passes kilo config check", () => {
   const config = JSON.parse(fs.readFileSync(file, "utf8"));
   assert.equal(config.permission.bash, "deny");
   assert.equal(config.permission.read, "allow");
-  assert.equal(config.permission.external_directory, "deny");
+  assert.equal(config.permission.external_directory, undefined, "external paths are enforced by Bridge path guards, not Kilo tool permissions");
   removeDir(dir);
 });

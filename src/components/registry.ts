@@ -198,33 +198,6 @@ export class ProjectRegistry {
     }
   }
 
-  static scsPlatform(): ProjectRegistrationInput {
-    return {
-      id: "scs-platform",
-      name: "Smart Commerce & Supply Platform",
-      repository: "nabeel2323/scs-platform",
-      localPath: "C:\\TAIF\\scs-platform",
-      baseBranch: "develop",
-      releaseBranch: "main",
-      worktreeRoot: "C:\\TAIF\\_kilo-worktrees\\scs-platform",
-      branchPrefix: "ai/kilo",
-      allowedAuthors: ["nabeel2323"],
-      runtime: {
-        nodeVersion: "22",
-        packageManager: "pnpm",
-        packageManagerVersion: "9.15.9",
-      },
-      projectType: "node",
-      verificationCommands: ["pnpm lint", "pnpm typecheck", "pnpm test:unit", "pnpm build"],
-      advisoryCommands: ["pnpm format:check"],
-      conditionalVerification: ["pnpm --filter @scs/api test:coverage"],
-      state: "active",
-      taskTimeoutMs: 6 * 60 * 60 * 1000,
-      pollIntervalMs: 30_000,
-      publishingEnabled: false,
-    };
-  }
-
   runtimeConfig(config: ProjectConfig): Record<string, unknown> {
     return {
       id: config.id,

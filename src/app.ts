@@ -232,14 +232,16 @@ export class KiloBridgeApp {
     });
     checks.push({
       name: "githubIntakeAllowedRepositories",
-      status: bridgeCfg.githubIntakeAllowedRepositories.length > 0 ? "PASS" : "WARNING",
+      status: bridgeCfg.githubIntakeEnabled && bridgeCfg.githubIntakeAllowedRepositories.length === 0 ? "WARNING" : "PASS",
       condition: `${bridgeCfg.githubIntakeAllowedRepositories.length} allowlisted`,
       explanation: bridgeCfg.githubIntakeAllowedRepositories.length > 0
         ? "An explicit repository allowlist is configured for the future dedicated GitHub intake service."
-        : "The repository allowlist is empty; no GitHub repository is trusted for autonomous intake.",
+        : "The repository allowlist is empty. This is the safe default while intake is disabled; no GitHub repository is trusted.",
       remediation: bridgeCfg.githubIntakeAllowedRepositories.length > 0
         ? "Review the list before enabling intake."
-        : "Add exact owner/repo entries only after reviewing the repository trust boundary.",
+        : bridgeCfg.githubIntakeEnabled
+        ? "Disable intake or add exact owner/repo entries after reviewing the repository trust boundary."
+        : "None required while intake is disabled; review the allowlist before enabling intake.",
     });
 
     const projects = this.ctx.registry.list();

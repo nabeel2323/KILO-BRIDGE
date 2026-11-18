@@ -18,8 +18,19 @@ import {
   REQUIRED_NATIVE_TOOL_PERMISSIONS,
 } from "../src/types";
 
-const KILO_BIN = "kilo";
-const BRIDGE_ROOT = path.resolve("C:/TAIF/KILO-BRIDGE");
+const KILO_BIN = process.env.KILO_BIN ?? "kilo";
+const KILO_CLI_AVAILABLE = (() => {
+  try {
+    execSync(`"${KILO_BIN}" --version`, { stdio: "ignore", windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+const KILO_CLI_TEST_OPTIONS = KILO_CLI_AVAILABLE
+  ? {}
+  : { skip: "Kilo CLI is not installed on this runner; this test requires the real native CLI." };
+const BRIDGE_ROOT = path.resolve(__dirname, "..", "..");
 const FIXTURES_ROOT = path.join(BRIDGE_ROOT, "test-fixtures");
 const LOCAL_PROVIDER_SERVER = path.join(FIXTURES_ROOT, "local-provider", "server.js");
 let PROVIDER_PORT: number | null = null;
@@ -75,26 +86,26 @@ async function waitForPort(port: number, timeoutMs = 15000): Promise<void> {
 // 1-4. Native tool permission tests via `kilo debug agent`
 // ---------------------------------------------------------------------------
 
-test("p310: smoke agent denies read", () => {
+test("p310: smoke agent denies read", KILO_CLI_TEST_OPTIONS, () => {
   const res = runKiloDebugAgent("bridge-smoke-test", "read");
   assert.equal(res.code !== 0, true, "expected non-zero exit code for denied tool");
   assert.ok(res.stdout.includes("disabled") || res.stderr.includes("disabled"), `expected "disabled" output, got: ${res.stdout}${res.stderr}`);
 });
 
-test("p310: smoke agent denies bash", () => {
+test("p310: smoke agent denies bash", KILO_CLI_TEST_OPTIONS, () => {
   const res = runKiloDebugAgent("bridge-smoke-test", "bash");
   assert.equal(res.code !== 0, true);
   assert.ok(res.stdout.includes("disabled") || res.stderr.includes("disabled"), `expected "disabled" output, got: ${res.stdout}${res.stderr}`);
 });
 
-test("p310: normal-coding agent allows read", () => {
+test("p310: normal-coding agent allows read", KILO_CLI_TEST_OPTIONS, () => {
   const res = runKiloDebugAgent("bridge-normal-coding-test", "read");
   const output = res.stdout + res.stderr;
   assert.ok(!output.includes("disabled"), `expected read to be allowed (schema error/file not found ok), got: ${output}`);
   assert.ok(output.includes("invalid arguments") || output.includes("filePath"), `expected read tool schema validation (allowed), got: ${output}`);
 });
 
-test("p310: normal-coding agent denies bash", () => {
+test("p310: normal-coding agent denies bash", KILO_CLI_TEST_OPTIONS, () => {
   const res = runKiloDebugAgent("bridge-normal-coding-test", "bash");
   assert.equal(res.code !== 0, true);
   assert.ok(res.stdout.includes("disabled") || res.stderr.includes("disabled"), `expected "disabled" output, got: ${res.stdout}${res.stderr}`);
@@ -241,7 +252,7 @@ test("p310: selectIsolationBackend returns WORKTREE_ONLY", () => {
   const caps = detectIsolationCapabilities();
   const sandbox = caps.find((c) => c.backend === "WINDOWS_SANDBOX");
   assert.ok(sandbox, "WINDOWS_SANDBOX capability entry must exist");
-  assert.equal(sandbox.available, true, "Windows Sandbox must be available on this machine");
+  assert.equal(typeof sandbox.available, "boolean", "availability must reflect the current host capability");
   assert.equal(sandbox.provisioned, false, "Windows Sandbox must not be provisioned");
   assert.equal(selectIsolationBackend(), "WORKTREE_ONLY", "WORKTREE_ONLY must be selected when no backend is provisioned");
 });
@@ -263,7 +274,7 @@ test("p310: path containment prevents escape", () => {
 // 9. kilo debug agent lists available tools
 // ---------------------------------------------------------------------------
 
-test("p310: kilo debug agent lists available tools", () => {
+test("p310: kilo debug agent lists available tools", KILO_CLI_TEST_OPTIONS, () => {
   const smoke = JSON.parse(execSync(`"${KILO_BIN}" debug agent bridge-smoke-test`, { encoding: "utf8", windowsHide: true }));
   const normal = JSON.parse(execSync(`"${KILO_BIN}" debug agent bridge-normal-coding-test`, { encoding: "utf8", windowsHide: true }));
   assert.equal(smoke.name, "bridge-smoke-test");
