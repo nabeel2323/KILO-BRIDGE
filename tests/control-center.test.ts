@@ -330,7 +330,8 @@ test("control center: authenticated SSE emits a snapshot and a refresh after per
     };
 
     const initial = await readUntil("event: snapshot", 5000);
-    assert.match(initial, /id: [a-f0-9]{64}/);
+    const initialId = initial.match(/id: ([a-f0-9]{64})/);
+    assert.ok(initialId, "snapshot must include a stable revision id");
 
     env.store.insertAudit({
       actor: "sse-test",
@@ -338,7 +339,10 @@ test("control center: authenticated SSE emits a snapshot and a refresh after per
       detail: "test-only",
     });
     const update = await readUntil("event: refresh", 7000);
-    assert.match(update, /control_center\.sse_test_change|event: refresh/);
+    const update = await readUntil("event: refresh", 7000);
+    const updateId = update.match(/id: ([a-f0-9]{64})/);
+    assert.ok(updateId, "refresh event must include a stable revision id");
+    assert.notEqual(updateId![1], initialId![1], "persisted activity must advance the revision");
   } finally {
     if (reader) await reader.cancel().catch(() => undefined);
     await env.cleanup();
