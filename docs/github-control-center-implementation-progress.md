@@ -79,7 +79,8 @@
 - [x] Add intake poll lock, stale-owner reconciliation, unique-claim index, and unit coverage (commits `34a958f`, `d1f1ebc`, `076e599`).
 - [x] Add SQL.js file-level writer lock, SHA-256 snapshot compare, temp-file atomic replacement, and stale-store invalidation (commit `b3af31f`).
 - [x] Add stale-snapshot regression test authored (commit `3be9bea`); execution evidence is pending.
-- [ ] Run full Windows CI against the new persistence commits and add a real child-process writer race/restart test.
+- [x] Add a true child-process writer test using Node `-e`, with independent PID and database module (commit `0d57999`).
+- [ ] Run full Windows CI for database persistence commits and capture the exact test/build result.
 
 ### Phase 2 — Dedicated GitHub intake
 
@@ -157,6 +158,7 @@
 | 2026-11-19 | 6 | Windows CI workflow | PASS | Workflow `.github/workflows/ci.yml`; run `44413204159` succeeded with 250 pass / 0 fail / 5 skipped on commit `c26b50a`. This predates the latest intake and database-concurrency commits. |
 | 2026-11-19 | 1/2 | Durable claims + fail-closed intake source | SOURCE COMMITTED | Schema-v5 claim table, repository-scoped unique key, intake poll lock, eligibility checks, claim-before-label ordering, reconciliation-required state, and gate-independence tests. Commits `d1f1ebc`, `34a958f`, `076e599`, `8d6c9eb`. |
 | 2026-11-19 | 1 | SQL.js stale-snapshot persistence guard | SOURCE + TEST COMMITTED; TEST EXECUTION PENDING | Commits `b3af31f` and `3be9bea`: exclusive persistence lock, SHA-256 compare-and-swap guard, same-directory temp file + rename, no close-time snapshot export, stale-instance refusal, and stale-writer regression test. Connected GitHub status endpoint returned no statuses for latest commit and exposed no push-triggered workflow run; no local Windows execution was performed. |
+| 2026-11-19 | 1 | Separate-process stale writer regression | TEST SOURCE COMMITTED; EXECUTION PENDING | Commit `0d57999` spawns a separate Node process against the same SQL.js file, writes through a distinct process snapshot, then verifies the parent stale writer is rejected and the child's committed value survives reopen. Windows CI result is not yet available through the connected status/run endpoints. |
 
 ### Runtime evidence inherited from earlier operator verification
 
