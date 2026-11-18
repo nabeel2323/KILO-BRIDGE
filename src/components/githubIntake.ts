@@ -8,6 +8,7 @@ import { SqliteStore } from "../db";
 import type {
   BridgeResult,
   GitHubIntakeClaim,
+  LabelName,
   ProjectConfig,
   TaskRecord,
 } from "../types";
@@ -35,14 +36,14 @@ export interface GitHubIntakeProvider {
   authStatus(): Promise<{ authenticated: boolean; user?: string; error?: string }>;
   listOpenIssues(opts?: { labels?: string[]; limit?: number }): Promise<BridgeResult<GitHubIssue[]>>;
   getIssue(issueNumber: number): Promise<BridgeResult<GitHubIssue>>;
-  addLabels(issueNumber: number, labels: string[]): Promise<BridgeResult<void>>;
+  addLabels(issueNumber: number, labels: LabelName[]): Promise<BridgeResult<void>>;
 }
 
 export interface GitHubIntakeOptions {
   bridgeRoot: string;
   config: Pick<BridgeConfig,
     "githubIntakeEnabled" | "githubIntakeAllowedRepositories" |
-    "ghEnabled" | "kiloEnabled" | "defaultTaskTimeoutMs"
+    "ghEnabled" | "kiloEnabled" | "workerEnabled" | "defaultTaskTimeoutMs"
   >;
   store: SqliteStore;
   registry: ProjectRegistry;
@@ -146,6 +147,7 @@ export class GitHubIntakeService {
     );
     if (trusted.size === 0) return failResult("no trusted GitHub repositories are configured", "INTAKE_NO_TRUSTED_REPOSITORIES");
 
+    // workerEnabled is intentionally not consulted here: GitHub intake is a separate gate.
     // Do not even inspect GitHub until a production-isolated execution backend is ready.
     let executionReady = false;
     try { executionReady = await this.opts.dispatcher.isReady(); } catch { executionReady = false; }

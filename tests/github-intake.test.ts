@@ -2,14 +2,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import path from "node:path";
 import { SqliteStore } from "../src/db";
 import { Logger } from "../src/components/logging";
 import { ProjectRegistry } from "../src/components/registry";
 import { GitHubIntakeService, type GitHubIntakeProvider, type GitHubIntakeDispatcher } from "../src/components/githubIntake";
 import type { BridgeConfig } from "../src/config";
-import type { GitHubIssue, } from "../src/components/github";
+import type { GitHubIssue } from "../src/components/github";
 import type { ProjectConfig } from "../src/types";
 import { makeTempDir, removeDir, makeProjectConfig } from "./helpers/fixtures";
 
@@ -88,12 +87,13 @@ async function setup(opts: {
   };
   const config: Pick<BridgeConfig,
     "githubIntakeEnabled" | "githubIntakeAllowedRepositories" |
-    "ghEnabled" | "kiloEnabled" | "defaultTaskTimeoutMs"
+    "ghEnabled" | "kiloEnabled" | "workerEnabled" | "defaultTaskTimeoutMs"
   > = {
     githubIntakeEnabled: opts.enabled ?? true,
     githubIntakeAllowedRepositories: opts.trusted ?? ["test-owner/test-repo"],
     ghEnabled: opts.ghEnabled ?? true,
     kiloEnabled: opts.kiloEnabled ?? true,
+    workerEnabled: opts.workerEnabled ?? false,
     defaultTaskTimeoutMs: 60_000,
   };
   const service = new GitHubIntakeService({
@@ -171,7 +171,7 @@ test("GitHub intake: author allowlist rejects untrusted authors without claiming
   } finally { env.cleanup(); }
 });
 
-test("GitHub intake: PR and closed Issue candidates are rejected", async (t) => {
+test("GitHub intake: PR and closed Issue candidates are rejected", async () => {
   for (const rejected of [issue({ pullRequest: true }), issue({ state: "closed" })]) {
     const env = await setup({ issue: rejected });
     try {
