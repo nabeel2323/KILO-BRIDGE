@@ -148,7 +148,7 @@ test("db: a separate Node process cannot cause a stale parent snapshot to overwr
     '  process.stderr.write(String(error && error.stack || error));',
     '  process.exitCode = 1;',
     '});',
-  ].join("\\n");
+  ].join("\n");
 
   execFileSync(process.execPath, ["-e", childProgram, compiledDbModule, dbPath], {
     cwd: process.cwd(),
