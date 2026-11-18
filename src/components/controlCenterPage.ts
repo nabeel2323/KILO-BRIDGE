@@ -164,7 +164,12 @@ button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);bac
     wireTaskRows();
   }
   function wireTaskRows(){
-    document.querySelectorAll("tr[data-task]").forEach(function(row){row.addEventListener("click",function(){showTask(row.dataset.task);});});
+    document.querySelectorAll("tr[data-task]").forEach(function(row){
+      row.addEventListener("click",function(event){
+        if(event.target && event.target.closest && event.target.closest("a"))return;
+        showTask(row.dataset.task).catch(showError);
+      });
+    });
   }
   async function showTask(id){
     var d=await api("/api/tasks/"+encodeURIComponent(id));var t=d.task;
@@ -172,7 +177,9 @@ button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);bac
     html+='<div class="kv"><span>Project</span><span>'+esc(t.projectId)+'</span></div><div class="kv"><span>Issue</span><span>'+safeIssueLink(t.issueUrl,"#"+t.issueNumber)+'</span></div><div class="kv"><span>Author</span><span>'+esc(t.author)+'</span></div><div class="kv"><span>Attempt</span><span>'+esc(t.attempt)+'</span></div><div class="kv"><span>Execution ID</span><span>'+esc(t.executionId||"—")+'</span></div></div><div class="card"><strong>Task instructions</strong><pre>'+esc(t.body)+'</pre></div></div>';
     html+='<div class="section"><h2>Lifecycle</h2>'+renderTable(["From","To","Actor","Time","Reason"],d.transitions.map(function(x){return '<tr><td>'+esc(x.fromStatus||"—")+'</td><td>'+badge(x.toStatus)+'</td><td>'+esc(x.actor||"—")+'</td><td>'+esc(x.createdAt)+'</td><td>'+esc(x.reason||"—")+'</td></tr>'; }),"No lifecycle transitions recorded.")+'</div>';
     html+='<div class="section"><h2>Executions</h2>'+renderTable(["Execution","Status","Started","Exit","Kilo"],d.executions.map(function(x){return '<tr><td>'+esc(x.id)+'</td><td>'+badge(x.status)+'</td><td>'+esc(x.startTime)+'</td><td>'+esc(x.exitCode===undefined?"—":x.exitCode)+'</td><td>'+esc(x.kiloVersion||"—")+'</td></tr>'; }),"No executions recorded.")+'</div>';
-    byId("task-detail").innerHTML=html;
+    var panel=byId("task-detail");
+    if(!panel){panel=document.createElement("div");panel.id="task-detail";byId("content").appendChild(panel);}
+    panel.innerHTML=html;
   }
   async function renderReview(){
     var d=await api("/api/tasks?limit=200");
