@@ -8,6 +8,27 @@ import { makeWorkerEnv, baseGhFixtures } from "./helpers/worker-env";
 import { git } from "./helpers/fixtures";
 import crypto from "node:crypto";
 
+test("worker: disabled gate blocks one-shot polling and continuous startup without side effects", async () => {
+  const env = await makeWorkerEnv();
+  try {
+    (env.worker as any).opts.config.workerEnabled = false;
+
+    const poll = await env.worker.pollOnce();
+    assert.equal(poll.ok, false);
+    assert.equal(poll.code, "WORKER_DISABLED");
+    assert.equal(env.ghCalls().length, 0, "disabled worker must not call GitHub");
+    assert.equal(env.kiloCalls().length, 0, "disabled worker must not launch Kilo");
+    assert.equal(env.store.listTasksByProject("test-project").length, 0, "disabled worker must not create tasks");
+
+    await env.worker.startContinuous(10);
+    assert.equal(env.worker.getState().running, false, "disabled worker must not enter continuous mode");
+    assert.equal(env.ghCalls().length, 0, "continuous start refusal must not call GitHub");
+    assert.equal(env.kiloCalls().length, 0, "continuous start refusal must not launch Kilo");
+  } finally {
+    env.cleanup();
+  }
+});
+
 test("worker e2e: full lifecycle READY→CLAIMED→RUNNING→REPORT_READY with report posted", async () => {
   const env = await makeWorkerEnv();
   const res = await env.worker.pollOnce();

@@ -155,6 +155,11 @@ export class Worker {
   }
 
   async pollOnce(): Promise<BridgeResult<PollProjectResult[]>> {
+    // Enforce the worker gate before lease recovery, provider calls, or any GitHub mutation.
+    // This protects direct one-shot callers as well as the continuous service entry point.
+    if (this.opts.config.workerEnabled !== true) {
+      return failResult("worker is disabled in bridge configuration", "WORKER_DISABLED");
+    }
     try { this.lifecycle.recoverExpiredLeases(this.opts.workerId); } catch { /* best effort */ }
     this.updateHeartbeat();
     this._lastPoll = new Date().toISOString();
@@ -172,6 +177,12 @@ export class Worker {
    * Updates heartbeat each cycle and tracks active project/task.
    */
   async startContinuous(intervalMs: number): Promise<void> {
+    if (this.opts.config.workerEnabled !== true) {
+      this._running = false;
+      this._stopRequested = true;
+      this.logger.warn("worker start refused because workerEnabled is false");
+      return;
+    }
     this._running = true;
     this._stopRequested = false;
     this.logger.info(`worker starting continuous polling (interval=${intervalMs}ms, pid=${process.pid})`);

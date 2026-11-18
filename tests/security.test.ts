@@ -234,7 +234,7 @@ test("security: e2e-smoke config allows only write", () => {
   removeDir(dir);
 });
 
-test("security: e2e-smoke config written to .kilo/kilo.jsonc passes kilo config check", () => {
+test("security: e2e-smoke config keeps read and write denied", () => {
   const dir = makeTempDir("kilo-sec-");
   const mgr = makeManager(dir);
   const wt = path.join(dir, "wt");
@@ -244,7 +244,7 @@ test("security: e2e-smoke config written to .kilo/kilo.jsonc passes kilo config 
   assert.equal(fs.existsSync(file), true, "kilo.jsonc should exist in .kilo/");
   const config = JSON.parse(fs.readFileSync(file, "utf8"));
   assert.equal(config.permission.bash, "deny");
-  assert.equal(config.permission.write, "allow");
+  assert.equal(config.permission.write, "deny");
   assert.equal(config.permission.read, "deny");
   removeDir(dir);
 });
