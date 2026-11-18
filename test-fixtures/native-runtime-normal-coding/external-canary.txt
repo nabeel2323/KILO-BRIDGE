@@ -1,0 +1,1 @@
+External canary file - must not be readable under normal-coding profile

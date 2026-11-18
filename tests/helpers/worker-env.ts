@@ -6,8 +6,8 @@ import { SqliteStore } from "../../src/db";
 import { Logger } from "../../src/components/logging";
 import { ProjectRegistry } from "../../src/components/registry";
 import { GitHubProvider } from "../../src/components/github";
-import { Worker, type WorkerMode } from "../../src/components/worker";
-import type { ProjectConfig } from "../../src/types";
+import { Worker } from "../../src/components/worker";
+import type { ProjectConfig, WorkerMode } from "../../src/types";
 import { makeFixtureRepo, makeTempDir, removeDir, git } from "./fixtures";
 
 const MOCK_GH = path.join(__dirname, "..", "..", "..", "tests", "helpers", "mock-gh.cjs");

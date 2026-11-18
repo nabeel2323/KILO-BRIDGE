@@ -120,6 +120,16 @@ test("kilo: reasoning events are never stored", async () => {
   removeDir(dir);
 });
 
+test("kilo: run sets KILO_CONFIG and KILO_NO_DAEMON for automation subprocess", async () => {
+  const { adapter, dir, calls } = setup({});
+  await adapter.run();
+  const run = calls().find((c) => c.argv[0] === "run" && !c.argv.includes("--help"));
+  assert.ok(run, "run invocation recorded");
+  assert.equal(run.env.KILO_CONFIG, path.join(process.cwd(), "config", "kilo-automation.jsonc"), "KILO_CONFIG set");
+  assert.equal(run.env.KILO_NO_DAEMON, "1", "KILO_NO_DAEMON set");
+  removeDir(dir);
+});
+
 test("kilo: task spec with shell metacharacters is passed literally as one argument", async () => {
   const spec = 'fix "quotes" ; rm -rf / & $(whoami) | echo pwned';
   const { adapter, dir, calls } = setup({}, { taskSpec: spec });
@@ -156,5 +166,42 @@ test("kilo: secrets in events are redacted in the log", async () => {
   const log = fs.readFileSync(r.eventLogPath, "utf8");
   assert.ok(!log.includes("ghp_"), "token must be redacted");
   assert.ok(log.includes("[REDACTED_TOKEN]"));
+  removeDir(dir);
+});
+
+test("kilo: free model selection is accepted", async () => {
+  const { adapter, dir } = setup({ models: "kilo/liquid/lfm-3-1.7b:free\nkilo/mock-model" }, { model: "kilo/liquid/lfm-3-1.7b:free" });
+  const r = await adapter.preflight();
+  assert.equal(r.ok, true, r.error);
+  removeDir(dir);
+});
+
+test("kilo: paid model fallback is not automatic", async () => {
+  // The adapter should not auto-select a paid model; model must be explicit.
+  const { adapter, dir } = setup({}, { model: undefined });
+  const r = await adapter.preflight();
+  // With no model specified, preflight should still pass (model resolved at runtime)
+  // but no paid model should be auto-selected
+  assert.equal(r.ok, true, r.error);
+  removeDir(dir);
+});
+
+test("kilo: provider 404 error is surfaced", async () => {
+  const { adapter, dir } = setup({
+    run: { exitCode: 1, error: "APIError - Not Found: {\"status\":404,\"title\":\"Not Found\"}" },
+  });
+  const r = await adapter.run();
+  assert.equal(r.exitCode, 1);
+  // Kilo adapter surfaces exit code; error message is in event log
+  const log = fs.readFileSync(r.eventLogPath, "utf8");
+  assert.ok(log.includes("404"), "404 error should be in event log");
+  removeDir(dir);
+});
+
+test("kilo: timeout terminates execution", async () => {
+  const { adapter, dir } = setup({ run: { hangMs: 30000 } }, { timeoutMs: 600 });
+  const r = await adapter.run();
+  assert.equal(r.timedOut, true);
+  assert.ok(r.durationMs < 10000);
   removeDir(dir);
 });

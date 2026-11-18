@@ -1,0 +1,2 @@
+Kilo Bridge deterministic read content.
+Line 2: synthetic file data.

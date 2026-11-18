@@ -16,6 +16,7 @@ export const BridgeConfigSchema = z.object({
   ghEnabled: z.boolean().default(false),
   kiloEnabled: z.boolean().default(false),
   workerEnabled: z.boolean().default(false),
+  ghBin: z.string().optional(),
 });
 
 export type BridgeConfig = z.infer<typeof BridgeConfigSchema>;
@@ -64,4 +65,20 @@ export function ensureProjectConfigDirs(project: ProjectConfig): void {
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Executable discovery (Phase 3.7)
+// ---------------------------------------------------------------------------
+
+export function resolveGhBin(bridgeRoot: string): string | null {
+  const cfg = loadBridgeConfig(bridgeRoot);
+  if (cfg.ghBin && fs.existsSync(cfg.ghBin)) {
+    return cfg.ghBin;
+  }
+  const envBin = process.env.KILO_GH_BIN;
+  if (envBin && fs.existsSync(envBin)) {
+    return envBin;
+  }
+  return null; // relies on PATH resolution
 }

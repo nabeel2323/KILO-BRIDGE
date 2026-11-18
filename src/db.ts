@@ -2,7 +2,6 @@
 
 import path from "node:path";
 import fs from "node:fs";
-import crypto from "node:crypto";
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js";
 import type {
   ProjectConfig,
@@ -40,6 +39,7 @@ export interface DbConnection {
   db: SqlJsDatabase;
   close(): void;
   export(): Uint8Array;
+  persist(): void;
 }
 
 function readAll(db: SqlJsDatabase, sql: string, params?: unknown[]): Row[] {
@@ -80,10 +80,11 @@ export class SqliteStore {
       db,
       close: () => this.close(),
       export: () => this.export(),
+      persist: () => this.persist(),
     };
   }
 
-  close(): void {
+  public close(): void {
     if (this.db) {
       try {
         fs.writeFileSync(this.dbPath, this.export());
@@ -95,26 +96,18 @@ export class SqliteStore {
     }
   }
 
-  // Persist the in-memory database to disk. Called after every mutation so
-  // leases, transitions and executions survive crashes (spec: persistent lease).
-  persist(): void {
-    if (!this.db) return;
-    const dir = path.dirname(this.dbPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const tmp = this.dbPath + ".tmp";
-    fs.writeFileSync(tmp, this.export());
-    fs.renameSync(tmp, this.dbPath);
-  }
-
-  private mutate(sql: string, params?: unknown[]): void {
-    const db = this.requireDb();
-    db.run(sql, params as any);
-    this.persist();
-  }
-
   private export(): Uint8Array {
     if (!this.db) throw new Error("database not open");
     return this.db.export();
+  }
+
+  private persist(): void {
+    if (!this.db) return;
+    try {
+      fs.writeFileSync(this.dbPath, this.db.export());
+    } catch {
+      // best-effort
+    }
   }
 
   private applyMigrations(db: SqlJsDatabase): void {
@@ -122,7 +115,8 @@ export class SqliteStore {
     if (version < 1) this.migration1(db);
     if (version < 2) this.migration2(db);
     if (version < 3) this.migration3(db);
-    this.setUserVersion(db, 3);
+    if (version < 4) this.migration4(db);
+    this.setUserVersion(db, 4);
   }
 
   private getUserVersion(db: SqlJsDatabase): number {
@@ -222,11 +216,21 @@ export class SqliteStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id TEXT PRIMARY KEY,
+        project_id TEXT,
+        actor TEXT,
+        action TEXT NOT NULL,
+        detail TEXT,
+        created_at TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+      CREATE INDEX IF NOT EXISTS idx_tasks_project_issue ON tasks(project_id, issue_number);
       CREATE INDEX IF NOT EXISTS idx_transitions_task ON task_transitions(task_id);
       CREATE INDEX IF NOT EXISTS idx_executions_task ON executions(task_id);
       CREATE INDEX IF NOT EXISTS idx_verifications_exec ON verifications(execution_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_project ON audit_log(project_id);
     `);
   }
 
@@ -236,23 +240,23 @@ export class SqliteStore {
   }
 
   private migration3(db: SqlJsDatabase): void {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS audit_log (
-        id TEXT PRIMARY KEY,
-        project_id TEXT,
-        actor TEXT,
-        action TEXT NOT NULL,
-        detail TEXT,
-        created_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_audit_project ON audit_log(project_id);
-    `);
+    // audit_log already created in migration1; no-op kept for schema versioning.
+  }
+
+  private migration4(db: SqlJsDatabase): void {
+    try { db.exec("ALTER TABLE verifications ADD COLUMN name TEXT"); } catch { /* ignore */ }
+  }
+
+  private runPersist(sql: string, params?: unknown[]): void {
+    const db = this.requireDb();
+    db.run(sql, params as any);
+    this.persist();
   }
 
   // ---------- projects ----------
   upsertProject(config: ProjectConfig, state: string): void {
     const now = new Date().toISOString();
-    this.mutate(
+    this.runPersist(
       `INSERT INTO projects (id, config, state, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET config=excluded.config, state=excluded.state, updated_at=excluded.updated_at`,
@@ -279,13 +283,13 @@ export class SqliteStore {
 
   setProjectState(id: string, state: string): void {
     const now = new Date().toISOString();
-    this.mutate(`UPDATE projects SET state = ?, updated_at = ? WHERE id = ?`, [state, now, id]);
+    this.runPersist(`UPDATE projects SET state = ?, updated_at = ? WHERE id = ?`, [state, now, id]);
   }
 
   // ---------- tasks ----------
   upsertTask(task: TaskRecord): void {
     const now = new Date().toISOString();
-    this.mutate(
+    this.runPersist(
       `INSERT INTO tasks (id, project_id, issue_number, issue_url, title, author, body, status,
         base_sha, feature_branch, worktree_path, execution_id, attempt, idempotency_key,
         lease_holder, lease_expires_at, last_comment_id, created_at, updated_at)
@@ -318,6 +322,14 @@ export class SqliteStore {
     return row ? this.mapTask(row) : null;
   }
 
+  getTaskByProjectIssue(projectId: string, issueNumber: number): TaskRecord | null {
+    const db = this.requireDb();
+    const row = readOne(
+      db, `SELECT * FROM tasks WHERE project_id = ? AND issue_number = ?`, [projectId, issueNumber]
+    );
+    return row ? this.mapTask(row) : null;
+  }
+
   listTasksByProject(projectId: string, status?: string): TaskRecord[] {
     const db = this.requireDb();
     let rows: Row[];
@@ -335,6 +347,16 @@ export class SqliteStore {
     return rows.map((r) => this.mapTask(r));
   }
 
+  listTasksByStatuses(statuses: string[]): TaskRecord[] {
+    const db = this.requireDb();
+    if (statuses.length === 0) return [];
+    const placeholders = statuses.map(() => "?").join(",");
+    const rows = readAll(
+      db, `SELECT * FROM tasks WHERE status IN (${placeholders}) ORDER BY created_at`, statuses
+    );
+    return rows.map((r) => this.mapTask(r));
+  }
+
   listReadyTasks(): TaskRecord[] {
     const db = this.requireDb();
     const rows = readAll(db, `SELECT * FROM tasks WHERE status = 'READY' ORDER BY created_at`);
@@ -342,21 +364,9 @@ export class SqliteStore {
   }
 
   setLastCommentId(taskId: string, commentId: number): void {
-    this.mutate(`UPDATE tasks SET last_comment_id = ?, updated_at = ? WHERE id = ?`, [commentId, new Date().toISOString(), taskId]);
-  }
-
-  getTaskByProjectIssue(projectId: string, issueNumber: number): TaskRecord | null {
     const db = this.requireDb();
-    const row = readOne(db, `SELECT * FROM tasks WHERE project_id = ? AND issue_number = ?`, [projectId, issueNumber]);
-    return row ? this.mapTask(row) : null;
-  }
-
-  listTasksByStatuses(statuses: string[]): TaskRecord[] {
-    if (statuses.length === 0) return [];
-    const db = this.requireDb();
-    const placeholders = statuses.map(() => "?").join(",");
-    const rows = readAll(db, `SELECT * FROM tasks WHERE status IN (${placeholders}) ORDER BY created_at`, statuses);
-    return rows.map((r) => this.mapTask(r));
+    db.run(`UPDATE tasks SET last_comment_id = ?, updated_at = ? WHERE id = ?`, [commentId, new Date().toISOString(), taskId]);
+    this.persist();
   }
 
   private mapTask(row: Row): TaskRecord {
@@ -385,11 +395,13 @@ export class SqliteStore {
 
   // ---------- transitions ----------
   insertTransition(t: TaskTransition): void {
-    this.mutate(
+    const db = this.requireDb();
+    db.run(
       `INSERT INTO task_transitions (id, task_id, from_status, to_status, reason, actor, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [t.id, t.taskId, t.fromStatus ?? null, t.toStatus, t.reason ?? null, t.actor ?? null, t.createdAt]
     );
+    this.persist();
   }
 
   listTransitions(taskId: string): TaskTransition[] {
@@ -408,7 +420,8 @@ export class SqliteStore {
 
   // ---------- executions ----------
   upsertExecution(e: ExecutionRecord): void {
-    this.mutate(
+    const db = this.requireDb();
+    db.run(
       `INSERT INTO executions (id, task_id, attempt, status, start_time, end_time, exit_code,
         duration_ms, kilo_version, kilo_session_id, kilo_model, kilo_agent, event_log_path, error_message)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -424,6 +437,7 @@ export class SqliteStore {
         e.kiloAgent ?? null, e.eventLogPath ?? null, e.errorMessage ?? null,
       ]
     );
+    this.persist();
   }
 
   getExecution(id: string): ExecutionRecord | null {
@@ -447,8 +461,8 @@ export class SqliteStore {
       status: this.mapExecStatus(String(row.status)),
       startTime: String(row.start_time),
       endTime: rowOptStr(row.end_time),
-      exitCode: rowOptNum(row.exit_code),
-      durationMs: rowOptNum(row.duration_ms),
+      exitCode: row.exit_code !== null && row.exit_code !== undefined ? Number(row.exit_code) : undefined,
+      durationMs: row.duration_ms !== null && row.duration_ms !== undefined ? Number(row.duration_ms) : undefined,
       kiloVersion: row.kilo_version ? String(row.kilo_version) : undefined,
       kiloSessionId: row.kilo_session_id ? String(row.kilo_session_id) : undefined,
       kiloModel: row.kilo_model ? String(row.kilo_model) : undefined,
@@ -460,16 +474,18 @@ export class SqliteStore {
 
   // ---------- verifications ----------
   insertVerification(v: Omit<VerificationRecord, "id">): void {
-    this.mutate(
-      `INSERT INTO verifications (id, execution_id, command, args, cwd, start_time, end_time,
+    const db = this.requireDb();
+    db.run(
+      `INSERT INTO verifications (id, execution_id, name, command, args, cwd, start_time, end_time,
         exit_code, duration_ms, stdout_path, stderr_path, passed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        cryptoRandomId(), v.executionId, v.command, JSON.stringify(v.args), v.cwd, v.startTime,
+        cryptoRandomId(), v.executionId, v.name ?? null, v.command, JSON.stringify(v.args), v.cwd, v.startTime,
         v.endTime ?? null, v.exitCode ?? null, v.durationMs ?? null, v.stdoutPath ?? null,
         v.stderrPath ?? null, v.passed === true ? 1 : v.passed === false ? 0 : null,
       ]
     );
+    this.persist();
   }
 
   listVerifications(executionId: string): VerificationRecord[] {
@@ -478,6 +494,7 @@ export class SqliteStore {
     return rows.map((r) => ({
       id: String(r.id),
       executionId: String(r.execution_id),
+      name: rowOptStr(r.name),
       command: String(r.command),
       args: (() => { try { return JSON.parse(String(r.args ?? "[]")); } catch { return []; } })(),
       cwd: String(r.cwd),
@@ -493,7 +510,8 @@ export class SqliteStore {
 
   // ---------- reports ----------
   upsertReport(r: ReportRecord): void {
-    this.mutate(
+    const db = this.requireDb();
+    db.run(
       `INSERT INTO reports (id, task_id, execution_id, status, report_path, issue_comment_id, posted_at, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
@@ -501,6 +519,7 @@ export class SqliteStore {
          issue_comment_id=excluded.issue_comment_id, posted_at=excluded.posted_at`,
       [r.id, r.taskId, r.executionId, r.status, r.reportPath, r.issueCommentId ?? null, r.postedAt ?? null, r.createdAt]
     );
+    this.persist();
   }
 
   getReports(taskId: string): ReportRecord[] {
@@ -520,12 +539,14 @@ export class SqliteStore {
 
   // ---------- security policies ----------
   upsertSecurityPolicy(policy: SecurityPolicy): void {
-    this.mutate(
+    const db = this.requireDb();
+    db.run(
       `INSERT INTO security_policies (project_id, config, created_at)
        VALUES (?, ?, ?)
        ON CONFLICT(project_id) DO UPDATE SET config=excluded.config`,
       [policy.projectId, JSON.stringify(policy), policy.createdAt]
     );
+    this.persist();
   }
 
   getSecurityPolicy(projectId: string): SecurityPolicy | null {
@@ -543,28 +564,33 @@ export class SqliteStore {
   }
 
   setMeta(key: string, value: string): void {
-    this.mutate(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [key, value]);
+    this.runPersist(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [key, value]);
   }
 
   // ---------- audit ----------
-  insertAudit(entry: { projectId?: string; actor?: string; action: string; detail?: string }): void {
-    this.mutate(
-      `INSERT INTO audit_log (id, project_id, actor, action, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-      [crypto.randomUUID(), entry.projectId ?? null, entry.actor ?? null, entry.action, entry.detail ?? null, new Date().toISOString()]
+  insertAudit(audit: { projectId?: string; actor?: string; action: string; detail?: string }): void {
+    const db = this.requireDb();
+    db.run(
+      `INSERT INTO audit_log (id, project_id, actor, action, detail, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [cryptoRandomId(), audit.projectId ?? null, audit.actor ?? null, audit.action, audit.detail ?? null, new Date().toISOString()]
     );
+    this.persist();
   }
 
-  listAudit(projectId?: string, limit: number = 100): Array<{ id: string; projectId?: string; actor?: string; action: string; detail?: string; createdAt: string }> {
+  listAudit(projectId?: string): Array<{ projectId: string | null; actor: string | null; action: string; detail: string | null; createdAt: string }> {
     const db = this.requireDb();
-    const rows = projectId
-      ? readAll(db, `SELECT * FROM audit_log WHERE project_id = ? ORDER BY created_at DESC LIMIT ?`, [projectId, limit])
-      : readAll(db, `SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?`, [limit]);
+    let rows: Row[];
+    if (projectId) {
+      rows = readAll(db, `SELECT * FROM audit_log WHERE project_id = ? ORDER BY created_at`, [projectId]);
+    } else {
+      rows = readAll(db, `SELECT * FROM audit_log ORDER BY created_at`);
+    }
     return rows.map((r) => ({
-      id: String(r.id),
-      projectId: rowOptStr(r.project_id),
-      actor: rowOptStr(r.actor),
+      projectId: r.project_id ? String(r.project_id) : null,
+      actor: r.actor ? String(r.actor) : null,
       action: String(r.action),
-      detail: rowOptStr(r.detail),
+      detail: r.detail ? String(r.detail) : null,
       createdAt: String(r.created_at),
     }));
   }
@@ -576,15 +602,9 @@ export class SqliteStore {
 
   private mapExecStatus(v: string): ExecutionRecord["status"] {
     switch (v) {
-      case "PENDING":
-      case "RUNNING":
-      case "COMPLETED":
-      case "FAILED":
-      case "TIMEOUT":
-      case "CANCELLED":
+      case "PENDING": case "RUNNING": case "COMPLETED": case "FAILED": case "TIMEOUT": case "CANCELLED":
         return v;
-      default:
-        return "FAILED";
+      default: return "FAILED";
     }
   }
 }
@@ -598,5 +618,5 @@ function rowOptNum(v: unknown): number | undefined {
 }
 
 function cryptoRandomId(): string {
-  return crypto.randomUUID();
+  return (require("node:crypto") as { randomUUID: () => string }).randomUUID();
 }

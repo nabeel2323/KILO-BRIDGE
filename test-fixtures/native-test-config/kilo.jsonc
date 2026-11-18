@@ -1,0 +1,24 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "provider": {
+    "local-test": {
+      "name": "Local Test Provider",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://127.0.0.1:34567/v1" },
+      "models": { "local-model": { "name": "local-model" } }
+    }
+  },
+  "permission": {
+    "read": "deny",
+    "glob": "deny",
+    "grep": "deny",
+    "edit": "deny",
+    "write": "deny",
+    "apply_patch": "deny",
+    "bash": "deny",
+    "external_directory": "deny",
+    "lsp": "deny",
+    "todoread": "deny",
+    "todowrite": "deny"
+  }
+}

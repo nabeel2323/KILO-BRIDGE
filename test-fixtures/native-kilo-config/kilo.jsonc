@@ -1,0 +1,26 @@
+﻿{
+  "$schema": "https://app.kilo.ai/config.json",
+  "provider": {
+    "name": "local-test",
+    "baseUrl": "http://127.0.0.1:34567/v1",
+    "models": {
+      "local-test/local-model": {
+        "name": "local-test/local-model"
+      }
+    }
+  },
+  "permission": {
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "edit": "allow",
+    "write": "allow",
+    "apply_patch": "deny",
+    "bash": "deny",
+    "external_directory": "deny",
+    "lsp": "deny",
+    "todoread": "deny",
+    "todowrite": "deny"
+  },
+  "agent": "bridge-normal-coding-test"
+}

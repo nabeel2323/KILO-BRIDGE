@@ -1,0 +1,3 @@
+some text
+PHASE312_GREP_MARKER here
+more text

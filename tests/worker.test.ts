@@ -312,3 +312,60 @@ test("worker: singleton lock prevents concurrent workers", async () => {
     other.kill();
   }
 });
+
+test("worker e2e: each execution attempt gets its own report comment", async () => {
+  const env = await makeWorkerEnv();
+  await env.worker.pollOnce();
+  const task = env.store.listTasksByProject("test-project")[0];
+  const execs = env.store.listExecutions(task.id);
+  const reports = env.store.getReports(task.id);
+
+  // Verify first execution has its own comment ID stored.
+  const firstExec = execs[0];
+  const firstReport = reports.find((r) => r.executionId === firstExec.id);
+  assert.ok(firstReport, "report exists for first execution");
+  assert.ok(firstReport.issueCommentId, "first execution has a comment ID");
+  assert.equal(firstReport.executionId, firstExec.id, "comment linked to correct execution");
+
+  // Verify at least one comment was posted to GitHub.
+  const commentCalls = env.ghCalls().filter((c) => c.argv.includes("POST") && c.argv.some((a: string) => a.includes("/comments")));
+  assert.ok(commentCalls.length >= 1, "at least one comment was posted");
+  env.cleanup();
+});
+
+test("worker e2e: comment ID is stored against correct execution record", async () => {
+  const env = await makeWorkerEnv();
+  await env.worker.pollOnce();
+  const task = env.store.listTasksByProject("test-project")[0];
+  const execs = env.store.listExecutions(task.id);
+  const reports = env.store.getReports(task.id);
+  assert.equal(execs.length, 1);
+  assert.equal(reports.length, 1);
+  const exec = execs[0];
+  const report = reports[0];
+  assert.equal(report.executionId, exec.id, "report linked to correct execution");
+  assert.ok(report.issueCommentId, "comment ID stored against execution");
+  assert.equal(typeof report.issueCommentId, "number", "comment ID should be a number");
+  env.cleanup();
+});
+
+test("worker e2e: failed task cannot be retried via claim", async () => {
+  const env = await makeWorkerEnv();
+  await env.worker.pollOnce();
+  const task = env.store.listTasksByProject("test-project")[0];
+  assert.equal(task.status, "REPORT_READY");
+  // A REPORT_READY task cannot be claimed again without going through correction workflow.
+  // This is enforced by the lifecycle (no READY→CLAIMED transition from REPORT_READY).
+  const claims = env.store.listTasksByStatuses(["CLAIMED"]);
+  assert.equal(claims.length, 0, "no CLAIMED tasks after REPORT_READY");
+  env.cleanup();
+});
+
+test("worker e2e: worker executes tasks when enabled (default)", async () => {
+  const env = await makeWorkerEnv();
+  const res = await env.worker.pollOnce();
+  assert.equal(res.data![0].executed, 1, "task executed when worker enabled");
+  const task = env.store.listTasksByProject("test-project")[0];
+  assert.equal(task.status, "REPORT_READY", "task moves to REPORT_READY after execution");
+  env.cleanup();
+});

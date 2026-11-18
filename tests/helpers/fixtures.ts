@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runProcess } from "../../src/components/process";
+import { runProcess, RunProcessResult } from "../../src/components/process";
 import type { ProjectConfig } from "../../src/types";
 
 export function makeTempDir(prefix = "kilo-bridge-test-"): string {
@@ -18,7 +18,7 @@ export function removeDir(dir: string): void {
   }
 }
 
-export async function git(cwd: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+export async function git(cwd: string, args: string[]): Promise<RunProcessResult> {
   return runProcess("git", ["-c", "safe.directory=" + cwd.replace(/\\/g, "/"), ...args], { cwd, timeoutMs: 30000 });
 }
 

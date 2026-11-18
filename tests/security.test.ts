@@ -20,8 +20,10 @@ test("security: generated kilo.json passes denial assertions", () => {
   assert.equal(r.ok, true, r.error);
   const config = JSON.parse(fs.readFileSync(path.join(wt, "kilo.json"), "utf8"));
   assert.deepEqual(findMissingDenials(config), []);
-  assert.equal(config.permission.bash["*"], "deny");
+  assert.equal(config.permission.bash, "deny");
   assert.equal(config.permission.external_directory, "deny");
+  assert.equal(config.permission.read, "allow");
+  assert.equal(config.permission.write, "allow");
   removeDir(dir);
 });
 
@@ -61,9 +63,9 @@ test("security: tampered config (bash allow) refused", async () => {
 
 test("security: removing a single required denial is detected", () => {
   const config = buildKiloPermissionConfig("C:\\TAIF\\KILO-BRIDGE") as any;
-  delete config.permission.bash["git push*"];
+  delete config.permission.bash;
   const missing = findMissingDenials(config);
-  assert.ok(missing.some((m) => m.includes("git push*")));
+  assert.ok(missing.some((m) => m.includes('permission.bash = "deny"')), "missing bash denial");
 });
 
 test("security: policy validation requires all denials", () => {
@@ -132,5 +134,184 @@ test("security: bridge command policy file written", () => {
   const policy = JSON.parse(fs.readFileSync(r.data!, "utf8"));
   assert.equal(policy.defaultAction, "deny");
   assert.ok(policy.rules.some((x: any) => x.command === "git push" && x.action === "deny"));
+  removeDir(dir);
+});
+
+test("security: project kilo config is deny-by-default", () => {
+  const dir = makeTempDir("kilo-sec-");
+  const mgr = makeManager(dir);
+  const config = mgr.buildKiloProjectConfig();
+  assert.equal(config.permission.bash, "deny");
+  assert.equal(config.permission.external_directory, "deny");
+  assert.equal(config.permission.read, "allow");
+  assert.equal(config.permission.edit, "allow");
+  assert.equal(config.permission.write, "allow");
+  removeDir(dir);
+});
+
+test("security: project kilo config written to .kilo/kilo.jsonc", () => {
+  const dir = makeTempDir("kilo-sec-");
+  const mgr = makeManager(dir);
+  const wt = path.join(dir, "wt");
+  const r = mgr.writeKiloProjectConfig(wt);
+  assert.equal(r.ok, true, r.error);
+  const file = path.join(wt, ".kilo", "kilo.jsonc");
+  assert.equal(fs.existsSync(file), true, "kilo.jsonc should exist in .kilo/");
+  const config = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(config.permission.bash, "deny");
+  assert.equal(config.permission.read, "allow");
+  assert.equal(config.permission.write, "allow");
+  removeDir(dir);
+});
+
+test("security: automation kilo config is deny-by-default", () => {
+  const dir = makeTempDir("kilo-sec-");
+  const mgr = makeManager(dir);
+  const config = mgr.buildKiloAutomationConfig();
+  assert.equal(config.permission.bash, "deny");
+  assert.equal(config.permission.external_directory, "deny");
+  assert.equal(config.permission.read, "allow");
+  assert.equal(config.permission.glob, "allow");
+  assert.equal(config.permission.edit, "allow");
+  removeDir(dir);
+});
+
+test("security: findMissingDenials detects missing bash denial", () => {
+  const config: any = {
+    permission: {
+      bash: "allow", // tampered: bash allowed
+      external_directory: "deny",
+    },
+  };
+  const missing = findMissingDenials(config);
+  assert.ok(missing.some((m) => m.includes('permission.bash = "deny"')), "missing bash denial");
+});
+
+test("security: findMissingDenials detects missing external_directory denial", () => {
+  const config: any = {
+    permission: {
+      bash: "deny",
+    },
+  };
+  const missing = findMissingDenials(config);
+  assert.ok(missing.some((m) => m.includes('permission.external_directory = "deny"')), "missing external_directory denial");
+});
+
+test("security: isCommandDenied blocks injection attempts", () => {
+  const dir = makeTempDir("kilo-sec-");
+  const mgr = makeManager(dir);
+  // Command injection via chaining with prohibited sub-commands.
+  for (const cmd of [
+    "pnpm lint; db:migrate",
+    "pnpm typecheck && git push origin main",
+    "pnpm test:unit || db:reset",
+    "pnpm build | kubectl apply",
+    "pnpm format:check `gh auth login`",
+  ]) {
+    assert.equal(mgr.isCommandDenied(cmd), true, `should deny injection: ${cmd}`);
+  }
+  // Safe commands with shell metacharacters are NOT denied (no prohibited sub-command).
+  for (const cmd of ["pnpm lint; git status", "pnpm typecheck && git diff"]) {
+    assert.equal(mgr.isCommandDenied(cmd), false, `should allow safe chained: ${cmd}`);
+  }
+  removeDir(dir);
+});
+
+test("security: e2e-smoke config allows only write", () => {
+  const dir = makeTempDir("kilo-sec-");
+  const mgr = makeManager(dir);
+  const config = mgr.buildKiloE2ESmokeConfig();
+  // Only write is allowed
+  assert.equal(config.permission.write, "allow");
+  // Everything else denied
+  assert.equal(config.permission.read, "deny");
+  assert.equal(config.permission.glob, "deny");
+  assert.equal(config.permission.grep, "deny");
+  assert.equal(config.permission.edit, "deny");
+  assert.equal(config.permission.bash, "deny");
+  assert.equal(config.permission.lsp, "deny");
+  assert.equal(config.permission.external_directory, "deny");
+  removeDir(dir);
+});
+
+test("security: e2e-smoke config written to .kilo/kilo.jsonc passes kilo config check", () => {
+  const dir = makeTempDir("kilo-sec-");
+  const mgr = makeManager(dir);
+  const wt = path.join(dir, "wt");
+  const r = mgr.writeKiloE2ESmokeConfig(wt);
+  assert.equal(r.ok, true, r.error);
+  const file = path.join(wt, ".kilo", "kilo.jsonc");
+  assert.equal(fs.existsSync(file), true, "kilo.jsonc should exist in .kilo/");
+  const config = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(config.permission.bash, "deny");
+  assert.equal(config.permission.write, "allow");
+  assert.equal(config.permission.read, "deny");
+  removeDir(dir);
+});
+
+test("security: normal coding config allows read/edit/write, denies bash", () => {
+  const dir = makeTempDir("kilo-sec-");
+  const mgr = makeManager(dir);
+  const config = mgr.buildKiloNormalCodingConfig();
+  // Allowed for coding
+  assert.equal(config.permission.read, "allow");
+  assert.equal(config.permission.glob, "allow");
+  assert.equal(config.permission.grep, "allow");
+  assert.equal(config.permission.edit, "allow");
+  assert.equal(config.permission.write, "allow");
+  assert.equal(config.permission.apply_patch, "allow");
+  // Denied
+  assert.equal(config.permission.bash, "deny");
+  assert.equal(config.permission.external_directory, "deny");
+  removeDir(dir);
+});
+
+test("security: normal coding config written to .kilo/kilo.jsonc", () => {
+  const dir = makeTempDir("kilo-sec-");
+  const mgr = makeManager(dir);
+  const wt = path.join(dir, "wt");
+  const r = mgr.writeKiloNormalCodingConfig(wt);
+  assert.equal(r.ok, true, r.error);
+  const file = path.join(wt, ".kilo", "kilo.jsonc");
+  assert.equal(fs.existsSync(file), true, "kilo.jsonc should exist in .kilo/");
+  const config = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(config.permission.read, "allow");
+  assert.equal(config.permission.edit, "allow");
+  assert.equal(config.permission.write, "allow");
+  assert.equal(config.permission.bash, "deny");
+  removeDir(dir);
+});
+
+test("security: smoke and normal-coding profiles are different", () => {
+  const dir = makeTempDir("kilo-sec-");
+  const mgr = makeManager(dir);
+  const smoke = mgr.buildKiloE2ESmokeConfig();
+  const normal = mgr.buildKiloNormalCodingConfig();
+  // Smoke denies read, normal allows it
+  assert.equal(smoke.permission.read, "deny");
+  assert.equal(normal.permission.read, "allow");
+  // Smoke denies write? No, smoke allows write
+  assert.equal(smoke.permission.write, "allow");
+  assert.equal(normal.permission.write, "allow");
+  // Both deny bash
+  assert.equal(smoke.permission.bash, "deny");
+  assert.equal(normal.permission.bash, "deny");
+  // Smoke denies edit, normal allows it
+  assert.equal(smoke.permission.edit, "deny");
+  assert.equal(normal.permission.edit, "allow");
+  removeDir(dir);
+});
+
+test("security: normal coding profile passes kilo config check", () => {
+  const dir = makeTempDir("kilo-sec-");
+  const mgr = makeManager(dir);
+  const wt = path.join(dir, "wt");
+  const r = mgr.writeKiloNormalCodingConfig(wt);
+  assert.equal(r.ok, true, r.error);
+  const file = path.join(wt, ".kilo", "kilo.jsonc");
+  const config = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(config.permission.bash, "deny");
+  assert.equal(config.permission.read, "allow");
+  assert.equal(config.permission.external_directory, "deny");
   removeDir(dir);
 });

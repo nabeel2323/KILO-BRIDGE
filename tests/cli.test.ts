@@ -10,10 +10,11 @@ import { makeTempDir, removeDir } from "./helpers/fixtures";
 const CLI = path.join(__dirname, "..", "..", "dist", "cli.js");
 
 function runCli(root: string, args: string[]) {
+  const ghBin = process.env.TEMP + "\\gh\\bin";
   return runProcess(process.execPath, [CLI, ...args], {
     cwd: root,
     timeoutMs: 60000,
-    env: { KILO_BRIDGE_ROOT: root },
+    env: { KILO_BRIDGE_ROOT: root, PATH: process.env.PATH + ";" + ghBin },
   });
 }
 
@@ -151,12 +152,109 @@ test("cli: dry-run worker discovers tasks without executing (mock gh)", async ()
   const root = makeTempDir("kilo-cli-");
   await runCli(root, ["init"]);
   await runCli(root, ["projects", "add", JSON.stringify(projectInput)]);
-  // Wire the mock gh via GH_BIN + a node shim is not possible for gh args;
-  // instead verify dry-run gating: no auth → project skipped gracefully.
   const r = await runCli(root, ["worker", "start", "--dry-run", "--project", "cli-project", "--json"]);
   assert.equal(r.code, 0, r.stderr);
   const data = JSON.parse(r.stdout);
   assert.equal(data.mode, "dry-run");
   assert.equal(data.results[0].project, "cli-project");
+  removeDir(root);
+});
+
+test("cli: doctor prints each check with status", async () => {
+  const root = makeTempDir("kilo-cli-");
+  await runCli(root, ["init"]);
+  const r = await runCli(root, ["doctor"]);
+  assert.equal(r.code, 0, r.stderr);
+  const output = r.stdout;
+  assert.ok(output.includes("node:"), "should list node check");
+  assert.ok(output.includes("git:"), "should list git check");
+  assert.ok(output.includes("gh:"), "should list gh check");
+  assert.ok(output.includes("kilo:"), "should list kilo check");
+  assert.ok(output.includes("sqlite:"), "should list sqlite check");
+  assert.ok(output.includes("bridge.config.json:"), "should list config check");
+  assert.ok(output.includes("workerEnabled:"), "should list workerEnabled check");
+  assert.ok(output.includes("projects:"), "should list projects check");
+  assert.ok(output.includes("scs-platform project:"), "should list scs-project check");
+  removeDir(root);
+});
+
+test("cli: doctor JSON output is parseable", async () => {
+  const root = makeTempDir("kilo-cli-");
+  await runCli(root, ["init"]);
+  const r = await runCli(root, ["doctor", "--json"]);
+  assert.equal(r.code, 0, r.stderr);
+  const data = JSON.parse(r.stdout);
+  assert.ok(Array.isArray(data.checks));
+  assert.ok(data.checks.some((c: any) => c.name === "node"));
+  assert.ok(data.checks.some((c: any) => c.name === "gh"));
+  assert.ok(data.checks.some((c: any) => c.name === "kilo"));
+  assert.ok(data.checks.some((c: any) => c.name === "sqlite"));
+  assert.ok(data.checks.some((c: any) => c.name === "workerEnabled"));
+  assert.ok(data.checks.some((c: any) => c.name === "scs-platform project"));
+  for (const c of data.checks) {
+    assert.ok(["PASS", "FAIL", "WARNING"].includes(c.status));
+    assert.ok(c.condition);
+    assert.ok(c.explanation);
+    assert.ok(c.remediation);
+  }
+  removeDir(root);
+});
+
+test("cli: root --help prints usage", async () => {
+  const root = makeTempDir("kilo-cli-");
+  await runCli(root, ["init"]);
+  const r = await runCli(root, ["--help"]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(r.stdout.includes("Kilo Bridge V1.0"));
+  assert.ok(r.stdout.includes("Usage: kilo-bridge <command>"));
+  assert.ok(r.stdout.includes("init"));
+  assert.ok(r.stdout.includes("doctor"));
+  assert.ok(r.stdout.includes("projects"));
+  assert.ok(r.stdout.includes("task execute"));
+  removeDir(root);
+});
+
+test("cli: root --h is alias for --help", async () => {
+  const root = makeTempDir("kilo-cli-");
+  await runCli(root, ["init"]);
+  const r = await runCli(root, ["-h"]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(r.stdout.includes("Kilo Bridge V1.0"));
+  removeDir(root);
+});
+
+test("cli: unknown command exits 1 with message", async () => {
+  const root = makeTempDir("kilo-cli-");
+  await runCli(root, ["init"]);
+  const r = await runCli(root, ["frobnicate"]);
+  assert.equal(r.code, 1);
+  assert.ok(r.stderr.includes("unknown command: frobnicate"));
+  removeDir(root);
+});
+
+test("cli: projects validate --help prints usage", async () => {
+  const root = makeTempDir("kilo-cli-");
+  await runCli(root, ["init"]);
+  const r = await runCli(root, ["projects", "validate", "--help"]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(r.stdout.includes("Validate a project configuration JSON"));
+  removeDir(root);
+});
+
+test("cli: projects validate missing arg exits 1", async () => {
+  const root = makeTempDir("kilo-cli-");
+  await runCli(root, ["init"]);
+  const r = await runCli(root, ["projects", "validate"]);
+  assert.equal(r.code, 1);
+  assert.ok(r.stderr.includes("usage: kilo-bridge projects validate"));
+  removeDir(root);
+});
+
+test("cli: projects validate invalid JSON exits 1", async () => {
+  const root = makeTempDir("kilo-cli-");
+  await runCli(root, ["init"]);
+  const r = await runCli(root, ["projects", "validate", "not-json"]);
+  assert.equal(r.code, 1);
+  assert.ok(r.stderr.includes("invalid JSON input"));
   removeDir(root);
 });

@@ -2,8 +2,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import type { BridgeResult, ReportStatus, TaskRecord, ExecutionRecord, VerificationRecord } from "../types";
-import { okResult, failResult } from "../types";
+import { BridgeResult, okResult, failResult, ReportStatus, VerificationRecord } from "../types";
 
 export interface ReportData {
   taskId: string;
@@ -34,25 +33,24 @@ export interface ReportData {
 
 export class ReportGenerator {
   private readonly reportsDir: string;
+  private readonly generated = new Set<string>();
 
   constructor(reportsDir: string) {
     this.reportsDir = reportsDir;
+    if (!fs.existsSync(this.reportsDir)) fs.mkdirSync(this.reportsDir, { recursive: true });
   }
 
   generate(data: ReportData): BridgeResult<string> {
-    // One report file per execution attempt. Previous reports are NEVER
-    // overwritten (spec §11); a collision is a hard error.
-    const safeTask = data.taskId.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const safeExec = data.executionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const taskDir = path.join(this.reportsDir, safeTask);
-    const file = path.join(taskDir, `attempt-${data.attempt}-${safeExec}.md`);
-    if (fs.existsSync(file)) {
-      return failResult(`report already exists, refusing to overwrite: ${file}`, "REPORT_EXISTS");
+    const key = `${data.executionId}:${data.attempt}`;
+    if (this.generated.has(key)) {
+      return failResult(`report already generated for ${key}`, "REPORT_EXISTS");
     }
+    const safe = data.taskId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const file = path.join(this.reportsDir, `${safe}-${data.executionId}-attempt-${data.attempt}.md`);
     const md = this.renderMarkdown(data);
     try {
-      if (!fs.existsSync(taskDir)) fs.mkdirSync(taskDir, { recursive: true });
       fs.writeFileSync(file, md, "utf8");
+      this.generated.add(key);
       return okResult(file);
     } catch (err) {
       return failResult(`failed to write report: ${err}`, "REPORT_WRITE_FAILED");
@@ -61,16 +59,17 @@ export class ReportGenerator {
 
   renderMarkdown(data: ReportData): string {
     const lines: string[] = [];
-    lines.push(`[kilo-bridge-report]`);
     lines.push(`# Implementation Report — Issue #${data.issueNumber}`);
+    lines.push("");
+    lines.push("[kilo-bridge-report]");
     lines.push("");
     lines.push("## Summary");
     lines.push("");
     lines.push(`- **Task ID:** ${data.taskId}`);
+    lines.push(`- **Attempt:** ${data.attempt}`);
     lines.push(`- **Project:** ${data.projectId}`);
     lines.push(`- **Issue URL:** ${data.issueUrl}`);
     lines.push(`- **Execution ID:** ${data.executionId}`);
-    lines.push(`- **Attempt:** ${data.attempt}`);
     lines.push(`- **Status:** ${data.status}`);
     lines.push(`- **Start:** ${data.startTime}`);
     lines.push(`- **End:** ${data.endTime}`);
@@ -170,7 +169,6 @@ export class ReportGenerator {
     return `Task #${data.issueNumber} (${data.projectId}): ${data.status}. Verifications failed: ${failed}. Branch: ${data.featureBranch ?? "n/a"}.`;
   }
 
-  // Build a comment body suitable for posting to GitHub (compact top + evidence).
   buildComment(data: ReportData, reportPath: string): string {
     const lines: string[] = [];
     lines.push(`[kilo-bridge-report] Implementation Report — Issue #${data.issueNumber}`);
@@ -216,18 +214,19 @@ export class ReportGenerator {
     return lines.join("\n");
   }
 
-  isFinal(status: ReportStatus): boolean {
-    return ["COMPLETE", "PARTIAL", "BLOCKED", "FAILED"].includes(status);
-  }
-
-  // Never COMPLETE when required tests failed or were not executed (spec §10).
-  // Every required command must have a result with passed === true.
-  shouldBeComplete(results: VerificationRecord[], requiredNames: string[]): boolean {
-    for (const name of requiredNames) {
-      const matching = results.filter((r) => r.command === name || r.args.join(" ") === name || `${r.command} ${r.args.join(" ")}`.trim() === name);
-      if (matching.length === 0) return false;
-      if (!matching.every((r) => r.passed === true)) return false;
+  shouldBeComplete(results: VerificationRecord[], required: string[]): boolean {
+    for (const name of required) {
+      const run = results.find((r) => {
+        const full = [r.command, ...r.args].join(" ");
+        return r.command === name || full === name;
+      });
+      if (!run) return false;
+      if (run.passed !== true) return false;
     }
     return true;
+  }
+
+  isFinal(status: ReportStatus): boolean {
+    return ["COMPLETE", "PARTIAL", "BLOCKED", "FAILED"].includes(status);
   }
 }

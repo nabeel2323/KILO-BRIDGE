@@ -1,0 +1,16 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "permission": {
+    "read": "deny",
+    "glob": "deny",
+    "grep": "deny",
+    "edit": "deny",
+    "write": "deny",
+    "apply_patch": "deny",
+    "bash": "deny",
+    "external_directory": "deny",
+    "lsp": "deny",
+    "todoread": "deny",
+    "todowrite": "deny"
+  }
+}

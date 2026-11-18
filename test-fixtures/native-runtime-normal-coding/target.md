@@ -1,0 +1,1 @@
+Phase 3.11 normal-coding test target - synthetic content for read/edit/write tests

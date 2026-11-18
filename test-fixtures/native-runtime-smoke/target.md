@@ -1,0 +1,1 @@
+Phase 3.11 smoke test target - synthetic content for read permission test

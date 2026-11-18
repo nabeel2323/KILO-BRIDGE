@@ -1,0 +1,14 @@
+﻿{
+  "name": "kilo-bridge-local-provider",
+  "version": "1.0.0",
+  "description": "Deterministic local OpenAI-compatible mock LLM provider for Kilo v7.8.27 native tool verification",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:port": "node server.js --port=34567"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

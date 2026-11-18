@@ -23,7 +23,7 @@ export class Logger {
     this.logsDir = opts.logsDir;
     this.serviceName = opts.serviceName ?? "kilo-bridge";
     this.enableConsole = opts.enableConsole ?? true;
-    this.enableNotifications = opts.enableNotifications ?? true;
+    this.enableNotifications = opts.enableNotifications ?? false;
     if (!fs.existsSync(this.logsDir)) {
       fs.mkdirSync(this.logsDir, { recursive: true });
     }
@@ -43,8 +43,9 @@ export class Logger {
     }
     if (this.enableConsole) {
       const prefix = `[${ts}] [${level.toUpperCase()}]`;
+      // Log to stderr to keep stdout clean for structured/JSON CLI output.
       // eslint-disable-next-line no-console
-      console.log(`${prefix} ${message}` + (meta ? ` ${JSON.stringify(meta)}` : ""));
+      console.error(`${prefix} ${message}` + (meta ? ` ${JSON.stringify(meta)}` : ""));
     }
   }
 
@@ -53,7 +54,6 @@ export class Logger {
   warn(message: string, meta?: unknown): void { this.write("warn", message, meta); }
   error(message: string, meta?: unknown): void { this.write("error", message, meta); }
 
-  // Windows notification (best-effort, non-fatal).
   notify(title: string, body: string): void {
     if (!this.enableNotifications) return;
     const ps = [

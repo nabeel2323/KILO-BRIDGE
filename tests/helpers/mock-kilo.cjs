@@ -12,7 +12,7 @@ const fixtures = fixturesPath && fs.existsSync(fixturesPath)
 
 const argv = process.argv.slice(2);
 if (callsPath) {
-  fs.appendFileSync(callsPath, JSON.stringify({ argv, cwd: process.cwd() }) + "\n");
+  fs.appendFileSync(callsPath, JSON.stringify({ argv, cwd: process.cwd(), env: { KILO_CONFIG: process.env.KILO_CONFIG, KILO_NO_DAEMON: process.env.KILO_NO_DAEMON } }) + "\n");
 }
 
 function out(text) { process.stdout.write(text + "\n"); }
@@ -68,7 +68,7 @@ if (cmd === "run") {
   }
   const finalText = run.finalText || "Mock task completed.";
   emit({ type: "message.part.updated", properties: { part: { type: "text", text: finalText } } });
-  emit({ type: "session.completed", session_id: run.sessionId || "mock-session-1", exitCode: run.exitCode ?? 0 });
+  emit({ type: "session.completed", session_id: run.sessionId || "mock-session-1", exitCode: run.exitCode ?? 0, error: run.error || undefined });
 
   if (run.hangMs) {
     setTimeout(() => process.exit(run.exitCode ?? 0), run.hangMs);

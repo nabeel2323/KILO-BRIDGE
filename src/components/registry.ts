@@ -1,6 +1,5 @@
 "use strict";
 
-import fs from "node:fs";
 import path from "node:path";
 import {
   BridgeResult,
@@ -39,18 +38,17 @@ export class ProjectRegistry {
       ...parsed.data,
       createdAt: now,
       updatedAt: now,
-      state: "active",
+      state: parsed.data.state ?? "active",
+      releaseBranch: parsed.data.releaseBranch ?? "main",
     };
     const validated = ProjectConfigSchema.safeParse(config);
     if (!validated.success) {
-      return failResult(`invalid project config: ${validated.error.message}`, "INVALID_PROJECT");
+      return failResult(`invalid project registration: ${validated.error.message}`, "INVALID_PROJECT");
     }
-    const structural = validateProjectStructure(validated.data);
-    if (!structural.ok) return structural;
     if (this.deps.getProject(config.id)) {
       return failResult(`project ${config.id} already registered`, "PROJECT_EXISTS");
     }
-    this.deps.upsertProject(validated.data, "active");
+    this.deps.upsertProject(validated.data, validated.data.state);
     return okResult(validated.data);
   }
 
@@ -67,13 +65,47 @@ export class ProjectRegistry {
     if (!parsed.success) {
       return failResult(`invalid project config: ${parsed.error.message}`, "INVALID_PROJECT");
     }
-    const config: ProjectConfig = { ...parsed.data, state: "active" };
+    const now = new Date().toISOString();
+    const config: ProjectConfig = {
+      ...parsed.data,
+      createdAt: now,
+      updatedAt: now,
+      state: parsed.data.state ?? "active",
+      releaseBranch: parsed.data.releaseBranch ?? "main",
+    };
+
+    // Absolute path requirements (Windows).
+    const mustBeAbsolute: (keyof ProjectConfig)[] = ["localPath", "worktreeRoot"];
+    for (const field of mustBeAbsolute) {
+      const value = (config as unknown as Record<string, unknown>)[field];
+      if (typeof value === "string" && !isAbsolutePath(value)) {
+        return failResult(`${field} must be an absolute path`, "INVALID_PATH");
+      }
+    }
+
+    // Worktree must not be inside the repo and repo must not be inside the worktree.
+    if (typeof config.localPath === "string" && typeof config.worktreeRoot === "string") {
+      const local = path.resolve(config.localPath);
+      const wt = path.resolve(config.worktreeRoot);
+      if (isWithin(local, wt) || isWithin(wt, local)) {
+        return failResult("worktree must be isolated from the repository working tree", "WORKTREE_NOT_ISOLATED");
+      }
+    }
+
+    if (!config.allowedAuthors || config.allowedAuthors.length === 0) {
+      return failResult("allowedAuthors must not be empty", "INVALID_PROJECT");
+    }
+    if (!config.baseBranch) {
+      return failResult("baseBranch is required", "INVALID_PROJECT");
+    }
+    if (!config.name) {
+      return failResult("name is required", "INVALID_PROJECT");
+    }
+
     const validated = ProjectConfigSchema.safeParse(config);
     if (!validated.success) {
       return failResult(`invalid project config: ${validated.error.message}`, "INVALID_PROJECT");
     }
-    const structural = validateProjectStructure(validated.data);
-    if (!structural.ok) return structural;
     return okResult(validated.data);
   }
 
@@ -98,11 +130,13 @@ export class ProjectRegistry {
     return okResult({ config: existing.config, state: existing.state, policy });
   }
 
-  // Configuration templates for supported project types.
   static template(projectType: string): Partial<ProjectRegistrationInput> {
     const base: Partial<ProjectRegistrationInput> = {
       allowedAuthors: [],
       verificationCommands: [],
+      advisoryCommands: [],
+      conditionalVerification: [],
+      releaseBranch: "main",
       publishingEnabled: false,
     };
     switch (projectType) {
@@ -120,9 +154,8 @@ export class ProjectRegistry {
           ...base,
           projectType: "laravel",
           runtime: { packageManager: "composer" },
-          // No automatic package installation (spec §3): dependencies must be
-          // provisioned by the user before enabling the worker.
           verificationCommands: ["php artisan test"],
+          advisoryCommands: [],
           branchPrefix: "ai/kilo",
         };
       case "django":
@@ -131,6 +164,7 @@ export class ProjectRegistry {
           projectType: "django",
           runtime: { packageManager: "pip" },
           verificationCommands: ["python manage.py test"],
+          advisoryCommands: [],
           branchPrefix: "ai/kilo",
         };
       case "odoo":
@@ -138,9 +172,8 @@ export class ProjectRegistry {
           ...base,
           projectType: "odoo",
           runtime: { packageManager: "pip" },
-          // Odoo verification is deployment-specific: require explicit user
-          // configuration rather than guessing (spec §14).
           verificationCommands: [],
+          advisoryCommands: [],
           branchPrefix: "ai/kilo",
         };
       case "flutter":
@@ -149,6 +182,7 @@ export class ProjectRegistry {
           projectType: "flutter",
           runtime: {},
           verificationCommands: ["flutter analyze", "flutter test"],
+          advisoryCommands: [],
           branchPrefix: "ai/kilo",
         };
       case "other":
@@ -158,6 +192,7 @@ export class ProjectRegistry {
           projectType: "other",
           runtime: {},
           verificationCommands: [],
+          advisoryCommands: [],
           branchPrefix: "ai/kilo",
         };
     }
@@ -181,52 +216,16 @@ export class ProjectRegistry {
       },
       projectType: "node",
       verificationCommands: ["pnpm lint", "pnpm typecheck", "pnpm test:unit", "pnpm build"],
-      conditionalVerification: ["pnpm --filter @scs/api test:coverage"],
       advisoryCommands: ["pnpm format:check"],
-      kiloModel: undefined,
-      kiloAgent: undefined,
+      conditionalVerification: ["pnpm --filter @scs/api test:coverage"],
+      state: "active",
       taskTimeoutMs: 6 * 60 * 60 * 1000,
       pollIntervalMs: 30_000,
       publishingEnabled: false,
     };
   }
 
-  // Runtime configuration summary for a project.
   runtimeConfig(config: ProjectConfig): Record<string, unknown> {
-    return runtimeSummary(config);
-  }
-}
-
-// Structural validation beyond zod shape checks: absolute paths, worktree
-// isolation from the main checkout, repository format, authorized authors.
-export function validateProjectStructure(config: ProjectConfig): BridgeResult<ProjectConfig> {
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(config.repository)) {
-    return failResult(`repository must be owner/name: ${config.repository}`, "INVALID_REPOSITORY");
-  }
-  if (!path.isAbsolute(config.localPath)) {
-    return failResult(`localPath must be an absolute path: ${config.localPath}`, "INVALID_PATH");
-  }
-  if (!path.isAbsolute(config.worktreeRoot)) {
-    return failResult(`worktreeRoot must be an absolute path: ${config.worktreeRoot}`, "INVALID_PATH");
-  }
-  const local = path.resolve(config.localPath).toLowerCase();
-  const worktrees = path.resolve(config.worktreeRoot).toLowerCase();
-  if (worktrees === local || worktrees.startsWith(local + path.sep)) {
-    return failResult("worktreeRoot must not be inside the project localPath (isolation)", "WORKTREE_NOT_ISOLATED");
-  }
-  if (local === worktrees || local.startsWith(worktrees + path.sep)) {
-    return failResult("localPath must not be inside the worktreeRoot (isolation)", "WORKTREE_NOT_ISOLATED");
-  }
-  if (config.allowedAuthors.length === 0) {
-    return failResult("allowedAuthors must not be empty", "INVALID_AUTHORS");
-  }
-  if (!config.baseBranch.trim()) {
-    return failResult("baseBranch must not be empty", "INVALID_BRANCH");
-  }
-  return okResult(config);
-}
-
-function runtimeSummary(config: ProjectConfig): Record<string, unknown> {
     return {
       id: config.id,
       repository: config.repository,
@@ -239,6 +238,7 @@ function runtimeSummary(config: ProjectConfig): Record<string, unknown> {
       runtime: config.runtime,
       projectType: config.projectType,
       verificationCommands: config.verificationCommands,
+      advisoryCommands: config.advisoryCommands,
       conditionalVerification: config.conditionalVerification,
       kiloModel: config.kiloModel,
       kiloAgent: config.kiloAgent,
@@ -247,4 +247,15 @@ function runtimeSummary(config: ProjectConfig): Record<string, unknown> {
       publishingEnabled: config.publishingEnabled,
       state: config.state,
     };
+  }
+}
+
+function isAbsolutePath(value: string): boolean {
+  // Windows absolute: drive letter or UNC.
+  return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith("\\\\");
+}
+
+function isWithin(child: string, ancestor: string): boolean {
+  const rel = path.relative(ancestor, child);
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }

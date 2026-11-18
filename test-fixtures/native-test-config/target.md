@@ -1,0 +1,1 @@
+Kilo Bridge Phase 3.10 native tool verification target file.

@@ -1,0 +1,1 @@
+{`n  "permission": {`n    "read": "deny",`n    "write": "allow",`n    "bash": "deny",`n    "external_directory": "deny",`n    "apply_patch": "allow"`n  }`n}

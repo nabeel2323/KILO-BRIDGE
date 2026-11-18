@@ -1,0 +1,1 @@
+﻿{  "permission":{"read":"deny","write":"allow","bash":"deny","external_directory":"deny","apply_patch":"allow"},  "$schema":"https://app.kilo.ai/config.json"}

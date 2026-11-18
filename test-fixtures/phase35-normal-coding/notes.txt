@@ -1,0 +1,4 @@
+Synthetic notes file for glob and grep testing.
+
+Contains the phrase PHASE35_GREP_MARKER for grep discovery.
+Contains notes about the normal-coding security profile test.

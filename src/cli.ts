@@ -3,7 +3,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { KiloBridgeApp } from "./app";
-import { ProjectRegistry } from "./components/registry";
+import { Worker } from "./components/worker";
+import { GitHubProvider } from "./components/github";
+import { ensureBridgeConfig } from "./config";
+import type { WorkerState, ProjectConfig, DoctorCheck } from "./types";
+import { LocalKiloIntegration, type Scenario } from "./components/localKiloIntegration";
+import type { SecurityProfileName } from "./components/security";
 
 function printJson(data: unknown): void {
   process.stdout.write(JSON.stringify(data, null, 2) + "\n");
@@ -17,139 +22,242 @@ function err(text: string): void {
   process.stderr.write(text + "\n");
 }
 
-function readJsonInput(input: string): any {
-  return fs.existsSync(input) ? JSON.parse(fs.readFileSync(input, "utf8")) : JSON.parse(input);
+function printHelp(): void {
+  print("Kilo Bridge V1.0 - Universal AI Development Coordinator");
+  print("");
+  print("Usage: kilo-bridge <command> [args] [--json]");
+  print("");
+  print("Commands:");
+  print("  init                           Initialize Bridge (db, dirs, config, register SCS)");
+  print("  doctor                         Verify environment and tools");
+  print("  configure set <key> <value>    Persist a bridge config key");
+  print("  start                          Start the worker (mock mode)");
+  print("  stop                           Stop the worker");
+  print("  status                         List projects and state");
+  print("  projects list                  List registered projects");
+  print("  projects add <json>            Register a project");
+  print("  projects validate <json>       Validate a project config");
+  print("  projects enable <id>           Enable a project");
+  print("  projects disable <id>          Disable a project");
+  print("  projects inspect <id>          Inspect a project");
+  print("  projects template <type>       Print a project config template");
+  print("  github bootstrap <project>     Auth check + initialize labels");
+  print("  github test <project>          Test GitHub authentication");
+  print("  tasks [project] [status]       List tasks");
+  print("  task <id>                      Show a task");
+  print("  task execute --project <id> --issue <number> --confirm-issue <number>");
+  print("                                    Execute a specific GitHub issue (manual, one-shot)");
+  print("  logs <id>                      Show task logs/verifications");
+  print("  reports <id>                   Show task reports");
+  print("  worker start [--dry-run] [--project <id>]  Run one worker poll");
+  print("  integration local-kilo  Run local Kilo integration (scenario: read|write|edit|search)");
+  print("  integration local-kilo [--scenario read|write|edit|search] [--profile smoke|integration-test|normal-coding] [--worktree <path>]");
+  print("  worker stop                    Stop the worker");
+  print("  verify --project <id>          Run independent verification");
+  print("");
 }
 
 async function main(argv: string[]): Promise<number> {
   const app = new KiloBridgeApp();
   const bridgeRoot = process.env.KILO_BRIDGE_ROOT ?? "C:\\TAIF\\KILO-BRIDGE";
+  const wantJson = argv.includes("--json");
+  const args = argv.filter((a) => a !== "--json");
 
-  const args = argv.slice(2);
-  const jsonFlag = args.includes("--json");
-  const positional = args.filter((a) => a !== "--json");
-  const cmd = positional[0] ?? "help";
-  const sub = positional[1] ?? null;
-  const rest = positional.slice(2);
+  // Handle --help / -h at root level only (when it's the command, not a subcommand arg).
+  if (args[2] === "--help" || args[2] === "-h") {
+    printHelp();
+    return 0;
+  }
 
-  const out = (human: () => void, data: unknown) => {
-    if (jsonFlag) printJson(data);
-    else human();
-  };
+  const cmd = args[2] ?? "help";
+  const sub = args[3] ?? null;
+  const rest = args.slice(4);
 
   try {
     switch (cmd) {
+      case "help":
+        printHelp();
+        return 0;
+
       case "init": {
-        const res = await app.init(bridgeRoot);
+        const isDefaultRoot = bridgeRoot.replace(/[\\/]+$/, "").toLowerCase() === "c:\\taif\\kilo-bridge";
+        const res = await app.init(bridgeRoot, isDefaultRoot);
         if (!res.ok) { err(`init failed: ${res.error}`); return 1; }
-        out(() => {
-          print("Kilo Bridge initialized.");
-          print(`Bridge root: ${bridgeRoot}`);
-          print("Next: kilo-bridge doctor");
-        }, { ok: true, bridgeRoot });
+        if (wantJson) printJson({ ok: true, bridgeRoot });
+        else { print("Kilo Bridge initialized."); print(`Bridge root: ${bridgeRoot}`); print("Run 'kilo-bridge doctor' to verify the environment."); }
         return 0;
       }
 
       case "doctor": {
-        const init = await app.init(bridgeRoot);
-        if (!init.ok) { err(`init failed: ${init.error}`); return 1; }
-        const res = await app.doctor();
+        await app.init(bridgeRoot, false);
+        const res = await app.doctor({ json: wantJson });
         if (!res.ok) { err(`doctor failed: ${res.error}`); return 1; }
-        const data = res.data!;
-        out(() => {
+        const data = res.data as { checks: DoctorCheck[]; allOk: boolean; manualExecutionReady: boolean };
+        if (wantJson) printJson(data);
+        else {
           print("Kilo Bridge doctor:");
-          for (const c of data.checks) print(`  ${c.ok ? "[OK]  " : "[FAIL]"} ${c.name}: ${c.detail}`);
-          print(data.allOk ? "All checks passed." : "Some checks failed. Resolve them before enabling the worker.");
-        }, data);
-        return data.allOk ? 0 : 1;
+          let hasFail = false;
+          let hasWarn = false;
+          for (const c of data.checks) {
+            const icon = c.status === "PASS" ? "[OK] " : c.status === "WARNING" ? "[WARN] " : "[FAIL] ";
+            print(`  ${icon}${c.name}: ${c.condition}`);
+            print(`    explanation: ${c.explanation}`);
+            print(`    remediation: ${c.remediation}`);
+            if (c.status === "FAIL") hasFail = true;
+            if (c.status === "WARNING") hasWarn = true;
+          }
+          if (hasFail) { err("Some checks failed."); return 1; }
+        if (data.manualExecutionReady) {
+          print("Manual execution ready: yes");
+        } else {
+          print("Manual execution ready: no");
+        }
+        if (hasWarn) {
+          print("Some warnings remain - review warnings above.");
+        } else {
+          print("All checks passed.");
+        }
+        }
+        return 0;
       }
 
       case "configure": {
-        const init = await app.init(bridgeRoot);
-        if (!init.ok) { err(`init failed: ${init.error}`); return 1; }
+        await app.init(bridgeRoot, false);
         if (sub === "set") {
-          const [key, value] = rest;
+          const key = rest[0];
+          const value = rest[1];
           if (!key || value === undefined) { err("usage: kilo-bridge configure set <key> <value>"); return 1; }
-          const res = app.configureSet(key, value);
-          if (!res.ok) { err(`configure failed: ${res.error}`); return 1; }
-          out(() => print(`set ${key} = ${value}`), res.data);
+          const allowed = ["pollIntervalMs", "defaultTaskTimeoutMs", "ghEnabled", "kiloEnabled", "workerEnabled", "ghBin"];
+          if (!allowed.includes(key)) { err(`configure set failed: unknown key ${key}`); return 1; }
+          const file = path.join(bridgeRoot, "bridge.config.json");
+          let cfg: any = {};
+          if (fs.existsSync(file)) try { cfg = JSON.parse(fs.readFileSync(file, "utf8")); } catch { cfg = {}; }
+          const numKeys = ["pollIntervalMs", "defaultTaskTimeoutMs"];
+          const boolKeys = ["ghEnabled", "kiloEnabled", "workerEnabled"];
+          if (key === "ghBin") {
+            // Validate absolute path.
+            if (!path.isAbsolute(value)) { err(`configure set failed: ghBin must be an absolute path, got: ${value}`); return 1; }
+            if (!fs.existsSync(value)) { err(`configure set failed: ghBin executable not found: ${value}`); return 1; }
+          }
+          cfg[key] = numKeys.includes(key) ? Number(value) : boolKeys.includes(key) ? value === "true" : value;
+          fs.writeFileSync(file, JSON.stringify(cfg, null, 2), "utf8");
+          if (wantJson) printJson({ ok: true, [key]: cfg[key] });
+          else print(`set ${key} = ${cfg[key]}`);
           return 0;
         }
-        const res = app.configureGet();
-        if (!res.ok) { err(`configure failed: ${res.error}`); return 1; }
-        out(() => {
-          print(`Configuration file: ${path.join(bridgeRoot, "bridge.config.json")}`);
-          printJson(res.data);
-          print("Edit with: kilo-bridge configure set <key> <value>");
-        }, res.data);
+        print("Configuration is stored in bridge.config.json under the Bridge directory.");
         return 0;
       }
 
       case "start": {
-        const init = await app.init(bridgeRoot);
-        if (!init.ok) { err(`init failed: ${init.error}`); return 1; }
-        print("Starting Kilo Bridge worker (persistent). Press Ctrl+C to stop gracefully.");
-        const res = await app.start();
+        await app.init(bridgeRoot, false);
+        const res = await app.workerStartContinuous();
         if (!res.ok) { err(`start failed: ${res.error}`); return 1; }
-        print("Worker stopped.");
+        const data = res.data as { pid: number; projectId?: string };
+        if (wantJson) printJson(data);
+        else print(`Worker started (pid=${data.pid}, project=${data.projectId ?? "all"}).`);
         return 0;
       }
 
       case "stop": {
-        const init = await app.init(bridgeRoot);
-        if (!init.ok) { err(`init failed: ${init.error}`); return 1; }
-        const res = app.stop();
+        await app.init(bridgeRoot, false);
+        const res = await app.workerStop();
         if (!res.ok) { err(`stop failed: ${res.error}`); return 1; }
-        out(() => print("Graceful shutdown requested. The worker exits after the current cycle."), { ok: true });
+        print("Worker stop requested.");
         return 0;
       }
 
       case "status": {
-        const init = await app.init(bridgeRoot);
-        if (!init.ok) { err(`init failed: ${init.error}`); return 1; }
-        const worker = app.workerStatus();
-        const projects = app.projectsList();
-        const tasks = app.tasksList();
-        if (!worker.ok || !projects.ok || !tasks.ok) { err("status failed"); return 1; }
-        const counts: Record<string, number> = {};
-        for (const t of tasks.data!) counts[t.status] = (counts[t.status] ?? 0) + 1;
-        out(() => {
-          print(`Worker: ${worker.data!.running ? `running (pid ${worker.data!.pid}, ${worker.data!.workerId})` : "not running"}`);
+        await app.init(bridgeRoot, false);
+        const [projRes, stateRes] = await Promise.all([app.projectsList(), app.workerStatus()]);
+        if (!projRes.ok) { err(`status failed: ${projRes.error}`); return 1; }
+        if (!stateRes.ok) { err(`status failed: ${stateRes.error}`); return 1; }
+        const data = projRes.data as Array<{ id: string; name: string; repository: string; state: string; localPath: string }>;
+        const state = stateRes.data as WorkerState;
+        const out = { worker: { running: state.running, pid: state.pid, workerId: state.workerId, heartbeat: state.heartbeat }, projects: data };
+        if (wantJson) printJson(out);
+        else {
+          print(`Worker: ${state.running ? "RUNNING" : "STOPPED"} (pid=${state.pid ?? "n/a"}, workerId=${state.workerId ?? "n/a"}, heartbeat=${state.heartbeat ?? "n/a"})`);
           print("Projects:");
-          for (const p of projects.data!) print(`  [${p.state}] ${p.id} (${p.repository}) @ ${p.localPath}`);
-          print(`Tasks by status: ${JSON.stringify(counts)}`);
-        }, { worker: worker.data, projects: projects.data, taskCounts: counts });
+          for (const p of data) print(`  ${p.state === "active" ? "[active] " : "[disabled] "}${p.id} (${p.repository}) @ ${p.localPath}`);
+          print(`Total: ${data.length}`);
+        }
         return 0;
       }
 
       case "projects": {
-        const init = await app.init(bridgeRoot);
-        if (!init.ok) { err(`init failed: ${init.error}`); return 1; }
+        await app.init(bridgeRoot, false);
         if (sub === "list") {
           const res = app.projectsList();
-          if (!res.ok) { err(res.error!); return 1; }
-          out(() => {
-            for (const p of res.data!) print(`[${p.state}] ${p.id} — ${p.name} (${p.repository})`);
-            print(`Total: ${res.data!.length}`);
-          }, res.data);
+          if (!res.ok) { err(res.error ?? "list failed"); return 1; }
+          if (wantJson) printJson(res.data);
+          else { for (const p of res.data as any[]) print(`${p.state === "active" ? "[active] " : "[disabled] "}${p.id} (${p.repository})`); }
           return 0;
         }
-        if (sub === "add" || sub === "validate") {
-          const input = rest[0];
-          if (!input) { err(`usage: kilo-bridge projects ${sub} <json-file|json>`); return 1; }
+        if (sub === "add") {
+          let input = rest[0];
+          if (!input) { err("usage: kilo-bridge projects add <json-file|json>"); return 1; }
           let parsed: any;
-          try { parsed = readJsonInput(input); } catch (e) { err(`invalid JSON input: ${e}`); return 1; }
-          const res = sub === "add" ? app.projectsAdd(parsed) : app.projectsValidate(parsed);
-          if (!res.ok) { err(`${sub} failed: ${res.error}`); return 1; }
-          out(() => print(sub === "add" ? `project added: ${res.data!.id}` : `project config valid: ${res.data!.id}`), res.data);
+          if (fs.existsSync(input)) {
+            try { parsed = JSON.parse(fs.readFileSync(input, "utf8")); }
+            catch (e) { err(`invalid JSON input: ${e}`); return 1; }
+          } else {
+            const raw = rest.join(" ");
+            try { parsed = JSON.parse(raw); }
+            catch (e) { err(`invalid JSON input: ${e}`); return 1; }
+          }
+          const res = app.projectsAdd(parsed);
+          if (!res.ok) { err(`add failed: ${res.error}`); return 1; }
+          if (wantJson) printJson(res.data);
+          else print(`project added: ${res.data!.id}`);
           return 0;
         }
-        if (sub === "enable" || sub === "disable") {
+        if (sub === "validate") {
+          let input = rest[0];
+          if (!input) { err("usage: kilo-bridge projects validate <json-file|json>"); return 1; }
+          if (input === "--help" || input === "-h") {
+            print("Usage: kilo-bridge projects validate <json-file|json>");
+            print("");
+            print("Validate a project configuration JSON.");
+            print("");
+            print("Arguments:");
+            print("  <json-file|json>  Path to a JSON file containing the project config,");
+            print("                    or the JSON string itself.");
+            print("");
+            print("Examples:");
+            print('  kilo-bridge projects validate ./my-project.json');
+            print('  kilo-bridge projects validate \'{"id":"my-project","name":"My Project"}\'');
+            return 0;
+          }
+          let parsed: any;
+          if (fs.existsSync(input)) {
+            try { parsed = JSON.parse(fs.readFileSync(input, "utf8")); }
+            catch (e) { err(`invalid JSON input: ${e}`); return 1; }
+          } else {
+            const raw = rest.join(" ");
+            try { parsed = JSON.parse(raw); }
+            catch (e) { err(`invalid JSON input: ${e}`); return 1; }
+          }
+          const res = app.projectsValidate(parsed);
+          if (!res.ok) { err(`validate failed: ${res.error}`); return 1; }
+          if (wantJson) printJson(res.data);
+          else print(`project config valid: ${res.data!.id}`);
+          return 0;
+        }
+        if (sub === "enable") {
           const id = rest[0];
-          if (!id) { err(`usage: kilo-bridge projects ${sub} <id>`); return 1; }
-          const res = sub === "enable" ? app.projectsEnable(id) : app.projectsDisable(id);
-          if (!res.ok) { err(`${sub} failed: ${res.error}`); return 1; }
-          out(() => print(`project ${id} ${sub}d.`), { ok: true, id });
+          if (!id) { err("usage: kilo-bridge projects enable <id>"); return 1; }
+          const res = app.projectsEnable(id);
+          if (!res.ok) { err(`enable failed: ${res.error}`); return 1; }
+          print(`project ${id} enabled.`);
+          return 0;
+        }
+        if (sub === "disable") {
+          const id = rest[0];
+          if (!id) { err("usage: kilo-bridge projects disable <id>"); return 1; }
+          const res = app.projectsDisable(id);
+          if (!res.ok) { err(`disable failed: ${res.error}`); return 1; }
+          print(`project ${id} disabled.`);
           return 0;
         }
         if (sub === "inspect") {
@@ -157,13 +265,17 @@ async function main(argv: string[]): Promise<number> {
           if (!id) { err("usage: kilo-bridge projects inspect <id>"); return 1; }
           const res = app.projectsInspect(id);
           if (!res.ok) { err(`inspect failed: ${res.error}`); return 1; }
-          printJson(res.data);
+          if (wantJson) printJson(res.data);
+          else print(JSON.stringify(res.data, null, 2));
           return 0;
         }
         if (sub === "template") {
-          const type = rest[0] ?? "node";
-          const tpl = ProjectRegistry.template(type);
-          printJson(tpl);
+          const type = rest[0];
+          if (!type) { err("usage: kilo-bridge projects template <type>"); return 1; }
+          const res = app.projectsTemplate(type);
+          if (!res.ok) { err(`template failed: ${res.error}`); return 1; }
+          if (wantJson) printJson(res.data);
+          else print(JSON.stringify(res.data, null, 2));
           return 0;
         }
         err("unknown projects subcommand. Use: list | add | validate | enable | disable | inspect | template");
@@ -171,175 +283,294 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "github": {
-        const init = await app.init(bridgeRoot);
-        if (!init.ok) { err(`init failed: ${init.error}`); return 1; }
-        const projectId = rest[0] ?? "scs-platform";
+        await app.init(bridgeRoot, false);
         if (sub === "bootstrap") {
+          const projectId = rest[0] ?? "scs-platform";
           const res = await app.githubBootstrap(projectId);
           if (!res.ok) { err(`bootstrap failed: ${res.error}`); return 1; }
-          out(() => {
-            print(`GitHub authenticated as ${res.data!.user ?? "unknown"}`);
-            print(`labels created: ${res.data!.labels.created.length}, already present: ${res.data!.labels.exists.length}`);
-          }, res.data);
+          const data = res.data as { authenticated: boolean; user?: string; labels: any };
+          print(`GitHub authenticated: ${data.authenticated}${data.user ? " as " + data.user : ""}`);
+          print(`labels created: ${data.labels.data.created.length}, exists: ${data.labels.data.exists.length}`);
           return 0;
         }
         if (sub === "test") {
+          const projectId = rest[0] ?? "scs-platform";
           const res = await app.githubTest(projectId);
           if (!res.ok) { err(`test failed: ${res.error}`); return 1; }
-          out(() => {
-            print(`GitHub authenticated: ${res.data!.authenticated}${res.data!.user ? " as " + res.data!.user : ""}`);
-            if (res.data!.rateLimit) print(`API rate limit: ${res.data!.rateLimit.remaining}/${res.data!.rateLimit.limit} remaining`);
-          }, res.data);
-          return res.data!.authenticated ? 0 : 1;
+          print(`GitHub authenticated: ${res.data!.authenticated}`);
+          return 0;
         }
         err("unknown github subcommand. Use: bootstrap | test");
         return 1;
       }
 
       case "tasks": {
-        const init = await app.init(bridgeRoot);
-        if (!init.ok) { err(`init failed: ${init.error}`); return 1; }
-        const res = app.tasksList(rest[0], rest[1]);
-        if (!res.ok) { err(res.error!); return 1; }
-        out(() => {
-          if (res.data!.length === 0) { print("No tasks."); return; }
-          for (const t of res.data!) {
-            print(`${t.id}  #${t.issueNumber}  [${t.status}]  ${t.projectId}  attempt ${t.attempt}  ${t.title}`);
-          }
-        }, res.data);
+        await app.init(bridgeRoot, false);
+        const projectId = rest[0] ?? null;
+        const status = rest[1] ?? null;
+        const res = app.tasksList(projectId, status);
+        if (!res.ok) { err(res.error ?? "tasks failed"); return 1; }
+        if (wantJson) printJson(res.data);
+        else { for (const t of res.data as any[]) print(`${t.status} #${t.issueNumber} ${t.title} (${t.projectId})`); }
         return 0;
       }
 
       case "task": {
-        const init = await app.init(bridgeRoot);
-        if (!init.ok) { err(`init failed: ${init.error}`); return 1; }
+        await app.init(bridgeRoot, false);
+        if (sub === "execute") {
+          const pIdx = args.indexOf("--project");
+          const projectId = pIdx >= 0 ? args[pIdx + 1] : undefined;
+          const iIdx = args.indexOf("--issue");
+          const issueNumber = iIdx >= 0 ? parseInt(args[iIdx + 1], 10) : undefined;
+          const cIdx = args.indexOf("--confirm-issue");
+          const confirmIssue = cIdx >= 0 ? parseInt(args[cIdx + 1], 10) : undefined;
+          const spIdx = args.indexOf("--security-profile");
+          const securityProfile = (spIdx >= 0 ? args[spIdx + 1] : undefined) as "smoke" | "normal-coding" | undefined;
+          if (!projectId || issueNumber === undefined || confirmIssue === undefined) {
+            err("usage: kilo-bridge task execute --project <id> --issue <number> --confirm-issue <number> [--security-profile smoke|normal-coding]");
+            return 1;
+          }
+          if (issueNumber !== confirmIssue) {
+            err(`confirm-issue (${confirmIssue}) does not match issue (${issueNumber})`);
+            return 1;
+          }
+          if (securityProfile && securityProfile !== "smoke" && securityProfile !== "normal-coding") {
+            err(`invalid security-profile: ${securityProfile}. Use 'smoke' or 'normal-coding'.`);
+            return 1;
+          }
+          const res = await app.taskExecute(projectId, issueNumber, { securityProfile });
+          if (!res.ok) { err(`task execute failed: ${res.error}`); return 1; }
+          if (wantJson) printJson(res.data);
+          else print(JSON.stringify(res.data, null, 2));
+          return 0;
+        }
         const id = rest[0];
         if (!id) { err("usage: kilo-bridge task <id>"); return 1; }
         const res = app.taskGet(id);
-        if (!res.ok) { err(res.error!); return 1; }
-        if (!res.data) { err(`task ${id} not found`); return 1; }
-        out(() => {
-          const t = res.data!.task;
-          print(`Task ${t.id}`);
-          print(`  Issue:    #${t.issueNumber} ${t.issueUrl}`);
-          print(`  Project:  ${t.projectId}`);
-          print(`  Status:   ${t.status} (attempt ${t.attempt})`);
-          print(`  Author:   ${t.author}`);
-          print(`  Branch:   ${t.featureBranch ?? "n/a"}`);
-          print(`  Worktree: ${t.worktreePath ?? "n/a"}`);
-          print(`  Base SHA: ${t.baseSha ?? "n/a"}`);
-          print("  Transitions:");
-          for (const tr of res.data!.transitions) print(`    ${tr.createdAt}  ${tr.fromStatus ?? "(new)"} -> ${tr.toStatus}  ${tr.reason ?? ""}`);
-        }, res.data);
+        if (!res.ok) { err(res.error ?? "task failed"); return 1; }
+        if (wantJson) printJson(res.data);
+        else print(JSON.stringify(res.data, null, 2));
         return 0;
       }
 
       case "logs": {
-        const init = await app.init(bridgeRoot);
-        if (!init.ok) { err(`init failed: ${init.error}`); return 1; }
+        await app.init(bridgeRoot, false);
         const id = rest[0];
         if (!id) { err("usage: kilo-bridge logs <id>"); return 1; }
         const res = app.taskLogs(id);
-        if (!res.ok) { err(res.error!); return 1; }
-        out(() => {
-          print("Executions:");
-          for (const e of res.data!.executions) {
-            print(`  ${e.id} attempt ${e.attempt} [${e.status}] exit ${e.exitCode ?? "n/a"} ${e.durationMs ?? 0}ms session ${e.kiloSessionId ?? "n/a"}`);
-            if (e.errorMessage) print(`    error: ${e.errorMessage}`);
-          }
-          print("Verifications:");
-          for (const v of res.data!.verifications) {
-            print(`  ${v.command} ${v.args.join(" ")} → exit ${v.exitCode ?? "n/a"} ${v.passed === true ? "PASS" : v.passed === false ? "FAIL" : "n/a"}`);
-          }
-        }, res.data);
+        if (!res.ok) { err(res.error ?? "logs failed"); return 1; }
+        if (wantJson) printJson(res.data);
+        else print(JSON.stringify(res.data, null, 2));
         return 0;
       }
 
       case "reports": {
-        const init = await app.init(bridgeRoot);
-        if (!init.ok) { err(`init failed: ${init.error}`); return 1; }
+        await app.init(bridgeRoot, false);
         const id = rest[0];
         if (!id) { err("usage: kilo-bridge reports <id>"); return 1; }
         const res = app.taskReports(id);
-        if (!res.ok) { err(res.error!); return 1; }
-        out(() => {
-          if (res.data!.length === 0) { print("No reports."); return; }
-          for (const r of res.data!) {
-            print(`${r.createdAt}  [${r.status}]  ${r.reportPath}${r.issueCommentId ? `  (comment ${r.issueCommentId})` : ""}`);
-          }
-        }, res.data);
+        if (!res.ok) { err(res.error ?? "reports failed"); return 1; }
+        if (wantJson) printJson(res.data);
+        else print(JSON.stringify(res.data, null, 2));
         return 0;
       }
 
       case "worker": {
-        const init = await app.init(bridgeRoot);
-        if (!init.ok) { err(`init failed: ${init.error}`); return 1; }
-        if (sub !== "start") { err("usage: kilo-bridge worker start [--dry-run] [--mock] [--project <id>]"); return 1; }
-        const dryRun = rest.includes("--dry-run");
-        const mock = rest.includes("--mock");
-        const pIdx = rest.indexOf("--project");
-        const projectId = pIdx >= 0 ? rest[pIdx + 1] : undefined;
-        const res = await app.workerStart({ dryRun, projectId, mock });
-        if (!res.ok) { err(`worker failed: ${res.error}`); return 1; }
-        out(() => {
-          print(`Worker poll complete (mode: ${res.data!.mode}).`);
-          for (const r of res.data!.results) {
-            print(`  ${r.project}: discovered=${r.discovered} executed=${r.executed} corrections=${r.corrections} published=${r.published}${r.skipped ? ` skipped: ${r.skipped}` : ""}`);
-            for (const rej of r.rejected) print(`    rejected #${rej.issue}: ${rej.reason}`);
-            for (const e of r.errors) print(`    error: ${e}`);
+        await app.init(bridgeRoot, false);
+        if (sub === "run") {
+          // Internal: spawned by `start` to run continuous polling in a detached process.
+          const continuous = args.includes("--continuous");
+          const pIdx = args.indexOf("--project");
+          const projectId = pIdx >= 0 ? args[pIdx + 1] : undefined;
+          if (continuous) {
+            const bridgeCfg = ensureBridgeConfig(bridgeRoot);
+            if (!bridgeCfg.workerEnabled) { err("worker is disabled in bridge.config.json"); return 1; }
+            const intervalMs = bridgeCfg.pollIntervalMs ?? 30_000;
+            const worker = new Worker({
+              store: app.store,
+              registry: app.registry,
+              logger: app.logger,
+              bridgeRoot,
+              config: {
+                dataDir: path.join(bridgeRoot, "data"),
+                dbPath: path.join(bridgeRoot, "data", "kilo-bridge.sqlite"),
+                logsDir: path.join(bridgeRoot, "logs"),
+                reportsDir: path.join(bridgeRoot, "reports"),
+                worktreeRoot: "",
+                pollIntervalMs: bridgeCfg.pollIntervalMs,
+                defaultTaskTimeoutMs: bridgeCfg.defaultTaskTimeoutMs,
+                ghEnabled: bridgeCfg.ghEnabled,
+                kiloEnabled: bridgeCfg.kiloEnabled,
+                workerEnabled: bridgeCfg.workerEnabled,
+              },
+              mode: "real",
+              githubFactory: (p: ProjectConfig) => {
+                const [owner, repo] = p.repository.split("/");
+                return new GitHubProvider({ owner, repo });
+              },
+              kiloBin: process.env.KILO_BIN ?? "kilo",
+              workerId: "bridge-worker",
+            });
+            await worker.startContinuous(intervalMs);
+            return 0;
           }
-        }, res.data);
+          err("usage: kilo-bridge worker run --continuous [--project <id>]");
+          return 1;
+        }
+        if (sub === "start") {
+          const continuous = args.includes("--continuous");
+          const once = args.includes("--once");
+          const dryRun = args.includes("--dry-run");
+          const pIdx = args.indexOf("--project");
+          const projectId = pIdx >= 0 ? args[pIdx + 1] : undefined;
+          // --dry-run without --continuous/--once runs a single dry-run poll.
+          if (dryRun && !continuous && !once) {
+            const res = await app.workerStart({ dryRun: true, projectId, once: true, mode: "dry-run" });
+            if (!res.ok) { err(`worker failed: ${res.error}`); return 1; }
+            const data = res.data as { mode: string; processed: number; results: any[] };
+            if (wantJson) printJson(data);
+            else { print(`Worker ${data.mode}: processed ${data.processed} project(s).`); for (const r of data.results) print(`  ${r.project}: discovered=${r.discovered} executed=${r.executed}`); }
+            return 0;
+          }
+          if (continuous || once) {
+            const res = await app.workerStart({ dryRun: dryRun, projectId, once: once || continuous, mode: dryRun ? "dry-run" : "mock" });
+            if (!res.ok) { err(`worker failed: ${res.error}`); return 1; }
+            const data = res.data as { mode: string; processed: number; results: any[] };
+            if (wantJson) printJson(data);
+            else { print(`Worker ${data.mode}: processed ${data.processed} project(s).`); for (const r of data.results) print(`  ${r.project}: discovered=${r.discovered} executed=${r.executed}`); }
+            return 0;
+          }
+          // Default: spawn detached continuous worker.
+          const res = await app.workerStartContinuous(projectId);
+          if (!res.ok) { err(`worker start failed: ${res.error}`); return 1; }
+          const data = res.data as { pid: number; projectId?: string };
+          if (wantJson) printJson(data);
+          else print(`Worker started (pid=${data.pid}, project=${data.projectId ?? "all"}).`);
+          return 0;
+        }
+        if (sub === "stop") {
+          const res = await app.workerStop();
+          if (!res.ok) { err(`worker stop failed: ${res.error}`); return 1; }
+          print("Worker stop requested.");
+          return 0;
+        }
+        err("usage: kilo-bridge worker start [--continuous|--once|--dry-run] [--project <id>] [--json]");
+        err("       kilo-bridge worker stop");
+        err("       kilo-bridge worker run --continuous [--project <id>]");
+        return 1;
+      }
+
+      case "integration": {
+        await app.init(bridgeRoot, false);
+        if (sub === "--help" || sub === "-h" || sub === null) {
+          print("Usage: kilo-bridge integration local-kilo [--scenario read|write|edit|search] [--profile smoke|integration-test|normal-coding] [--worktree <path>]");
+          print("");
+          print("Run local Kilo integration against an isolated worktree.");
+          print("");
+          print("Options:");
+          print("  --scenario     Integration scenario: read | write | edit | search (default: read)");
+          print("  --profile      Test profile: smoke | integration-test | normal-coding (default: integration-test)");
+          print("  --worktree     Path to the isolated worktree (default: synthetic worktree under bridge root)");
+          return 0;
+        }
+        if (sub !== "local-kilo") {
+          err(`unknown integration subcommand: ${sub}. Use: local-kilo`);
+          return 1;
+        }
+        const sIdx = args.indexOf("--scenario");
+        const scenario = (sIdx >= 0 ? args[sIdx + 1] : undefined) ?? "read";
+        const pIdx = args.indexOf("--profile");
+        const profile = (pIdx >= 0 ? args[pIdx + 1] : undefined) ?? "integration-test";
+        const wIdx = args.indexOf("--worktree");
+        let worktreePath = wIdx >= 0 ? args[wIdx + 1] : undefined;
+        const validScenarios = ["read", "write", "edit", "search"];
+        const validProfiles = ["smoke", "integration-test", "normal-coding"];
+        if (!validScenarios.includes(scenario)) { err(`invalid scenario: ${scenario}. Use: ${validScenarios.join(", ")}`); return 1; }
+        if (!validProfiles.includes(profile)) { err(`invalid profile: ${profile}. Use: ${validProfiles.join(", ")}`); return 1; }
+        if (!worktreePath) {
+          worktreePath = path.join(bridgeRoot, "worktrees", "integration-local-kilo");
+        }
+        if (!fs.existsSync(worktreePath)) {
+          fs.mkdirSync(worktreePath, { recursive: true });
+        }
+        const integration = new LocalKiloIntegration({ bridgeRoot });
+        const result = await integration.runProfile(worktreePath, profile as SecurityProfileName, { scenario: scenario as Scenario });
+        if (wantJson) {
+          printJson(result);
+        } else {
+          print(`executionId: ${result.executionId}`);
+          print(`profile: ${result.profile}`);
+          print(`scenario: ${scenario}`);
+          print(`model: ${result.model}`);
+          print(`providerEndpoint: ${result.providerEndpoint}`);
+          print(`exitCode: ${result.exitCode}`);
+          print(`finalStatus: ${result.finalStatus}`);
+          print(`durationMs: ${result.durationMs}`);
+          print(`toolInvocations: ${result.toolInvocations}`);
+          print(`filesystemChanges: ${result.filesystemChanges}`);
+          print(`stdout: ${result.stdout}`);
+          print(`stderr: ${result.stderr}`);
+        }
+        return result.finalStatus === "COMPLETED" ? 0 : 1;
+      }
+      case "verify": {
+        await app.init(bridgeRoot, false);
+        const pIdx = args.indexOf("--project");
+        const projectId = pIdx >= 0 ? args[pIdx + 1] : "scs-platform";
+        const res = await app.verifyProject(projectId);
+        if (!res.ok) { err(`verify failed: ${res.error}`); return 1; }
+        if (wantJson) printJson(res.data);
+        else print(JSON.stringify(res.data, null, 2));
         return 0;
       }
 
-      case "verify": {
-        const init = await app.init(bridgeRoot);
-        if (!init.ok) { err(`init failed: ${init.error}`); return 1; }
-        const pIdx = rest.indexOf("--project");
-        const projectId = pIdx >= 0 ? rest[pIdx + 1] : (sub === "--project" ? rest[0] : sub) ?? "scs-platform";
-        const res = await app.verifyProject(projectId);
-        if (!res.ok) { err(`verify failed: ${res.error}`); return 1; }
-        out(() => {
-          if (res.data!.message) { print(res.data!.message); return; }
-          print(`Verification for task ${res.data!.taskId}:`);
-          for (const r of res.data!.results) {
-            print(`  ${r.name} → exit ${r.exitCode ?? "n/a"} ${r.passed ? "PASS" : "FAIL"}`);
-          }
-        }, res.data);
+      case "security": {
+        await app.init(bridgeRoot, false);
+        if (sub !== "test") { err("usage: kilo-bridge security test --profile smoke|normal-coding"); return 1; }
+        const spIdx = args.indexOf("--profile");
+        const profile = spIdx >= 0 ? args[spIdx + 1] : undefined;
+        if (!profile) { err("usage: kilo-bridge security test --profile smoke|normal-coding"); return 1; }
+        if (profile !== "smoke" && profile !== "normal-coding") { err(`invalid profile: ${profile}. Use 'smoke' or 'normal-coding'.`); return 1; }
+        const res = await app.securityTest(profile);
+        if (!res.ok) { err(`security test failed: ${res.error}`); return 1; }
+        if (wantJson) printJson(res.data);
+        else print(JSON.stringify(res.data, null, 2));
         return 0;
       }
 
       case "help":
-      default:
         print("Kilo Bridge V1.0 - Universal AI Development Coordinator");
         print("");
         print("Usage: kilo-bridge <command> [args] [--json]");
         print("");
         print("Commands:");
-        print("  init                           Initialize Bridge (db, dirs, config)");
-        print("  doctor                         Verify environment, tools and authentication");
-        print("  configure [set <key> <value>]  Show or update bridge configuration");
-        print("  start                          Start the persistent worker (requires workerEnabled)");
-        print("  stop                           Request graceful worker shutdown");
-        print("  status                         Worker state, projects, task counts");
+        print("  init                           Initialize Bridge (db, dirs, config, register SCS)");
+        print("  doctor                         Verify environment and tools");
+        print("  configure set <key> <value>    Persist a bridge config key");
+        print("  start                          Start the worker (mock mode)");
+        print("  stop                           Stop the worker");
+        print("  status                         List projects and state");
         print("  projects list                  List registered projects");
-        print("  projects add <json-file|json>  Register a project");
+        print("  projects add <json>            Register a project");
         print("  projects validate <json>       Validate a project config");
         print("  projects enable <id>           Enable a project");
         print("  projects disable <id>          Disable a project");
-        print("  projects inspect <id>          Show project config and security policy");
-        print("  projects template <type>       Print a config template (node|laravel|django|odoo|flutter|other)");
-        print("  github bootstrap [project]     Auth check + initialize Kilo labels");
-        print("  github test [project]          Test GitHub authentication and rate limit");
+        print("  projects inspect <id>          Inspect a project");
+        print("  projects template <type>       Print a project config template");
+        print("  github bootstrap <project>     Auth check + initialize labels");
+        print("  github test <project>          Test GitHub authentication");
         print("  tasks [project] [status]       List tasks");
-        print("  task <id>                      Show a task and its transitions");
-        print("  logs <id>                      Show executions and verification results");
-        print("  reports <id>                   Show implementation reports");
-        print("  worker start [--dry-run] [--mock] [--project <id>]   Run one worker poll");
-        print("  verify --project <id>          Re-run independent verification");
+        print("  task <id>                      Show a task");
+        print("  logs <id>                      Show task logs/verifications");
+        print("  reports <id>                   Show task reports");
+        print("  worker start [--dry-run] [--project <id>]  Run one worker poll");
+        print("  verify --project <id>          Run independent verification");
         print("");
-        print("Global flags: --json (structured output for automation)");
-        return cmd === "help" ? 0 : 1;
+        return 0;
+
+      default:
+        err(`unknown command: ${cmd}`);
+        return 1;
     }
   } catch (e) {
     err(`unexpected error: ${e}`);
@@ -347,8 +578,9 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-// Set exitCode and let the event loop drain: process.exit() during pending
-// pipe writes triggers a libuv assertion on Windows (UV_HANDLE_CLOSING).
 main(process.argv).then((code) => {
   process.exitCode = code;
+  // Let the event loop drain naturally. On Windows/Node 26 a forced
+  // process.exit() during child/handle teardown can trigger libuv async
+  // handle assertions in test harnesses that spawn this CLI repeatedly.
 });

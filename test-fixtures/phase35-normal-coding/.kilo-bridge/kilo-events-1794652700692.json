@@ -1,0 +1,28 @@
+[
+  {
+    "type": "error",
+    "timestamp": 1794652698743,
+    "sessionID": "ses_e265e270bffei9cagfQ5hM870k",
+    "error": {
+      "name": "APIError",
+      "data": {
+        "message": "Not Found: {\"status\":404,\"title\":\"Not Found\",\"detail\":\"Function '8378ffb2-51b0-4140-9684-dda1889373e6': Not found for account '6mIAsxQzJZ1G2fEqr1h4Z77-sTLT9g53lAXYTWZT4yA'\"}",
+        "statusCode": 404,
+        "isRetryable": false,
+        "responseHeaders": {
+          "connection": "keep-alive",
+          "content-length": "162",
+          "content-type": "application/problem+json",
+          "date": "Sat, 14 Nov 2026 10:38:18 GMT",
+          "nvcf-error-source": "upstream_status",
+          "vary": "Origin",
+          "x-request-id": "d20d76b6-201e-49cf-9ce1-ecc47b437b62"
+        },
+        "responseBody": "{\"status\":404,\"title\":\"Not Found\",\"detail\":\"Function '8378ffb2-51b0-4140-9684-dda1889373e6': Not found for account '6mIAsxQzJZ1G2fEqr1h4Z77-sTLT9g53lAXYTWZT4yA'\"}",
+        "metadata": {
+          "url": "https://integrate.api.nvidia.com/v1/chat/completions"
+        }
+      }
+    }
+  }
+]
