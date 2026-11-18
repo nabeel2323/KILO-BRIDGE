@@ -54,6 +54,7 @@ export interface SandboxTaskRunResult {
   importedFiles: string[];
   error: string | null;
   cleanup: "complete" | "failed";
+  evidencePath?: string;
 }
 
 export interface SandboxTaskRunnerOptions {
@@ -493,6 +494,7 @@ export class WindowsSandboxTaskRunner {
     let relay: SandboxProviderFileRelay | null = null;
     let manifest: GuestManifest | null = null;
     let providerCount = 0;
+    let evidencePath: string | undefined;
     try {
       fs.mkdirSync(path.dirname(runRoot), { recursive: true });
       if (fs.existsSync(runRoot)) throw new Error("Sandbox execution directory already exists");
@@ -571,6 +573,17 @@ export class WindowsSandboxTaskRunner {
       }
       manifest = JSON.parse(fs.readFileSync(resultFile, "utf8")) as GuestManifest;
       const validation = validateSandboxTaskManifest(manifest, executionId);
+      evidencePath = this.persistEvidence(manifest, validation.errors, providerCount) ?? undefined;
+      if (!evidencePath) {
+        return finish("EVIDENCE_INCOMPLETE", {
+          kiloExitCode: manifest.kiloExitCode,
+          kiloVersion: manifest.kiloVersion,
+          providerRequests: providerCount,
+          toolEvidence: manifest.toolEvidence ?? [],
+          artifacts: manifest.artifacts ?? [],
+          error: "could not persist the guest execution evidence into Bridge data",
+        });
+      }
       if (!validation.ok) {
         const status: SandboxTaskFinalStatus =
           manifest.finalStatus === "TIMED_OUT" ? "TIMED_OUT" :
@@ -579,7 +592,7 @@ export class WindowsSandboxTaskRunner {
         return finish(status, {
           kiloExitCode: manifest.kiloExitCode, kiloVersion: manifest.kiloVersion,
           providerRequests: providerCount, toolEvidence: manifest.toolEvidence ?? [],
-          artifacts: manifest.artifacts ?? [], error: validation.errors.join("; "),
+          artifacts: manifest.artifacts ?? [], evidencePath, error: validation.errors.join("; "),
         });
       }
       const imported = this.applyArtifacts(worktree, outbox, manifest.artifacts);
@@ -587,14 +600,14 @@ export class WindowsSandboxTaskRunner {
       return finish("COMPLETED", {
         kiloExitCode: manifest.kiloExitCode, kiloVersion: manifest.kiloVersion,
         providerRequests: providerCount, toolEvidence: manifest.toolEvidence,
-        artifacts: manifest.artifacts, importedFiles: imported.data ?? [],
+        artifacts: manifest.artifacts, importedFiles: imported.data ?? [], evidencePath,
       });
     } catch (error) {
       providerCount = relay?.requestCount ?? providerCount;
       return finish("FAILED", {
         kiloExitCode: manifest?.kiloExitCode ?? null, kiloVersion: manifest?.kiloVersion ?? null,
         providerRequests: providerCount, toolEvidence: manifest?.toolEvidence ?? [],
-        artifacts: manifest?.artifacts ?? [], error: sanitizeError(error),
+        artifacts: manifest?.artifacts ?? [], evidencePath, error: sanitizeError(error),
       });
     } finally {
       if (relay) await relay.stop().catch(() => undefined);
@@ -604,6 +617,67 @@ export class WindowsSandboxTaskRunner {
         cleanup = "failed";
       }
       if (finalResult[0]) finalResult[0].cleanup = cleanup;
+    }
+  }
+
+  private persistEvidence(
+    manifest: GuestManifest,
+    validationErrors: string[],
+    providerRequests: number
+  ): string | null {
+    const directory = path.join(this.root, "data", "sandbox-evidence");
+    const file = path.join(directory, manifest.executionId + ".json");
+    const temp = file + "." + crypto.randomUUID() + ".tmp";
+    // Persist only bounded operational evidence. Never persist prompts, provider
+    // request bodies, credentials, or raw Kilo stdout/stderr.
+    const safeEvidence = {
+      protocolVersion: manifest.protocolVersion,
+      executionId: manifest.executionId,
+      finalStatus: manifest.finalStatus,
+      startedAt: manifest.startedAt,
+      completedAt: manifest.completedAt,
+      kiloExitCode: manifest.kiloExitCode,
+      kiloVersion: manifest.kiloVersion,
+      providerRequests,
+      stages: Array.isArray(manifest.stages)
+        ? manifest.stages.slice(0, 100).map((stage) => ({
+            stage: stage.stage,
+            ok: stage.ok,
+            at: stage.at,
+          }))
+        : [],
+      toolEvidence: Array.isArray(manifest.toolEvidence)
+        ? manifest.toolEvidence.slice(0, MAX_TOOL_EVIDENCE_ITEMS).map((item) => ({
+            name: item.name,
+            eventType: item.eventType,
+            timestamp: item.timestamp,
+          }))
+        : [],
+      artifacts: Array.isArray(manifest.artifacts)
+        ? manifest.artifacts.slice(0, MAX_FILES).map((item) => ({
+            path: item.path,
+            action: item.action,
+            sha256: item.sha256,
+            size: item.size,
+          }))
+        : [],
+      validationErrors,
+      error: manifest.error ? sanitizeError(manifest.error) : null,
+    };
+    try {
+      fs.mkdirSync(directory, { recursive: true });
+      const fd = fs.openSync(temp, "wx", 0o600);
+      try {
+        fs.writeFileSync(fd, JSON.stringify(safeEvidence, null, 2), "utf8");
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(temp, file);
+      return file;
+    } catch {
+      try { if (fs.existsSync(temp)) fs.unlinkSync(temp); } catch { /* best effort */ }
+      return null;
     }
   }
 
