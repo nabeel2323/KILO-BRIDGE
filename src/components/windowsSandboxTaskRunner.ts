@@ -459,15 +459,16 @@ export class WindowsSandboxTaskRunner {
     const executionId = opts.executionId ?? crypto.randomUUID();
     const agent = opts.agent ?? "build";
     const model = "bridge-relay/bridge-model";
-    let finalResult: SandboxTaskRunResult | null = null;
+    const finalResult: SandboxTaskRunResult[] = [];
     let cleanup: "complete" | "failed" = "complete";
     const finish = (status: SandboxTaskFinalStatus, extra: Partial<SandboxTaskRunResult> = {}): SandboxTaskRunResult => {
-      finalResult = {
+      const value: SandboxTaskRunResult = {
         executionId, finalStatus: status, startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startMs,
         kiloExitCode: null, kiloVersion: null, model, agent, providerRequests: 0, toolEvidence: [], artifacts: [],
         importedFiles: [], error: null, cleanup: "complete", ...extra,
       };
-      return finalResult;
+      finalResult[0] = value;
+      return value;
     };
 
     if (!/^[0-9a-f-]{36}$/i.test(executionId)) return finish("FAILED", { error: "executionId must be a UUID" });
@@ -602,7 +603,7 @@ export class WindowsSandboxTaskRunner {
       } catch {
         cleanup = "failed";
       }
-      if (finalResult) finalResult.cleanup = cleanup;
+      if (finalResult[0]) finalResult[0].cleanup = cleanup;
     }
   }
 
