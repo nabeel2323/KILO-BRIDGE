@@ -19,8 +19,13 @@ const MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 128 * 1024 * 1024;
 const MAX_PROVIDER_REQUESTS = 128;
+const MAX_MANIFEST_BYTES = 8 * 1024 * 1024;
+const MAX_TOOL_EVIDENCE_ITEMS = 10_000;
 const PROVIDER_TIMEOUT_MS = 15 * 60 * 1000;
-const EXCLUDED_DIRS = new Set([".git", "node_modules", ".kilo", ".kilo-bridge"]);
+const EXCLUDED_DIRS = new Set([
+  ".git", "node_modules", ".kilo", ".kilo-bridge",
+  ".ssh", ".aws", ".azure", ".gcloud", ".gnupg", ".docker",
+]);
 
 export type SandboxTaskFinalStatus =
   | "COMPLETED" | "FAILED" | "TIMED_OUT" | "BOOT_FAILED"
@@ -48,6 +53,7 @@ export interface SandboxTaskRunResult {
   artifacts: SandboxTaskArtifact[];
   importedFiles: string[];
   error: string | null;
+  cleanup: "complete" | "failed";
 }
 
 export interface SandboxTaskRunnerOptions {
@@ -108,8 +114,14 @@ function isRestrictedArtifactPath(value: string): boolean {
   const file = parts[parts.length - 1] ?? "";
   if (parts.some((part) => EXCLUDED_DIRS.has(part))) return true;
   if (file === ".env" || (file.startsWith(".env.") && file !== ".env.example")) return true;
-  if ([".npmrc", ".pypirc", "credentials", "credentials.json", "id_rsa", "id_ed25519"].includes(file)) return true;
-  return /\.(pem|key|p12|pfx|jks|keystore)$/i.test(file) || /^credentials([._-]|$)/i.test(file);
+  if (file === ".kilo-bridge-task.md") return true;
+  if ([
+    ".npmrc", ".pypirc", ".netrc", ".git-credentials", "credentials",
+    "credentials.json", "id_rsa", "id_ed25519", "id_ecdsa",
+    "authorized_keys", "known_hosts", "dockerconfigjson",
+  ].includes(file)) return true;
+  return /\.(pem|key|p12|pfx|jks|keystore|ppk)$/i.test(file) ||
+    /^credentials([._-]|$)/i.test(file);
 }
 
 export function normalizeSandboxArtifactPath(value: string): string | null {
@@ -117,7 +129,14 @@ export function normalizeSandboxArtifactPath(value: string): string | null {
   const normalized = value.replace(/\\/g, "/");
   if (normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized) || normalized.startsWith("//")) return null;
   const parts = normalized.split("/");
-  if (parts.some((part) => !part || part === "." || part === "..")) return null;
+  if (parts.some((part) =>
+    !part ||
+    part === "." ||
+    part === ".." ||
+    /[<>:"|?*]/.test(part) ||
+    /[\u0000-\u001f\u007f]/.test(part) ||
+    /[ .]$/.test(part)
+  )) return null;
   if (parts.some((part) => /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(part))) return null;
   if (isRestrictedArtifactPath(normalized)) return null;
   return parts.join("/");
@@ -164,7 +183,7 @@ function copyStageFiles(sourceRoot: string, targetRoot: string, files: StagedFil
   }
 }
 
-function buildGuestProviderBridge(): string {
+export function buildGuestProviderBridge(): string {
   return [
     '"use strict";',
     'const fs=require("node:fs"),path=require("node:path"),http=require("node:http"),crypto=require("node:crypto");',
@@ -199,7 +218,7 @@ function buildGuestProviderBridge(): string {
   ].join("\n");
 }
 
-function buildGuestBootstrap(): string {
+export function buildGuestBootstrap(): string {
   const lines = [
     'param([string]$InBox,[string]$OutBox,[string]$WorkDir,[string]$ExecutionId,[int]$TimeoutMs)',
     '$ErrorActionPreference="Stop";$ProgressPreference="SilentlyContinue"',
@@ -243,7 +262,7 @@ function buildGuestBootstrap(): string {
   return lines.join("\r\n");
 }
 
-function buildWsb(inbox: string, outbox: string, bootstrap: string, executionId: string, timeoutMs: number): string {
+export function buildWsb(inbox: string, outbox: string, bootstrap: string, executionId: string, timeoutMs: number): string {
   const xml = (value: string): string => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
   const command = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + xml(bootstrap) + "\" " +
     "-InBox \"" + xml(GUEST_INBOX) + "\" -OutBox \"" + xml(GUEST_OUTBOX) + "\" -WorkDir \"" + xml(GUEST_WORK) + "\" " +
@@ -374,11 +393,20 @@ export function validateSandboxTaskManifest(value: unknown, executionId: string)
   if (manifest.finalStatus !== "COMPLETED") errors.push("guest final status is not COMPLETED");
   if (manifest.kiloExitCode !== 0) errors.push("Kilo exit code is not zero");
   const required = ["guest-bootstrap-started","mapped-folders-accessible","node-runtime-found","kilo-launcher-found","kilo-config-found","provider-script-found","provider-started","provider-health","kilo-started","kilo-completed","result-file-written"];
-  if (!Array.isArray(manifest.stages)) errors.push("guest stages missing");
+  if (!Array.isArray(manifest.stages) || manifest.stages.length > 100) errors.push("guest stages missing or exceed the allowed count");
   else for (const stage of required) if (!manifest.stages.some((item) => item?.stage === stage && item.ok === true)) errors.push("required guest stage missing: " + stage);
-  if (!Array.isArray(manifest.toolEvidence) || !manifest.toolEvidence.length) errors.push("native Kilo tool evidence missing");
-  else if (manifest.toolEvidence.some((item) => !item || !item.name?.trim() || !/tool/i.test(item.eventType))) errors.push("native tool evidence malformed");
-  if (!Array.isArray(manifest.artifacts)) errors.push("artifact manifest missing");
+  if (!Array.isArray(manifest.toolEvidence) || !manifest.toolEvidence.length ||
+      manifest.toolEvidence.length > MAX_TOOL_EVIDENCE_ITEMS) errors.push("native Kilo tool evidence missing or exceeds the allowed count");
+  else if (manifest.toolEvidence.some((item) =>
+    !item ||
+    typeof item.name !== "string" ||
+    !item.name.trim() ||
+    item.name.length > 128 ||
+    typeof item.eventType !== "string" ||
+    item.eventType.length > 128 ||
+    !/tool/i.test(item.eventType)
+  )) errors.push("native tool evidence malformed");
+  if (!Array.isArray(manifest.artifacts) || manifest.artifacts.length > MAX_FILES) errors.push("artifact manifest missing or exceeds the allowed count");
   else for (const artifact of manifest.artifacts) {
     if (!artifact || !normalizeSandboxArtifactPath(artifact.path)) errors.push("unsafe artifact path");
     else if (artifact.action === "added" || artifact.action === "modified") {
@@ -431,10 +459,16 @@ export class WindowsSandboxTaskRunner {
     const executionId = opts.executionId ?? crypto.randomUUID();
     const agent = opts.agent ?? "build";
     const model = "bridge-relay/bridge-model";
-    const finish = (status: SandboxTaskFinalStatus, extra: Partial<SandboxTaskRunResult> = {}): SandboxTaskRunResult => ({
-      executionId, finalStatus: status, startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startMs,
-      kiloExitCode: null, kiloVersion: null, model, agent, providerRequests: 0, toolEvidence: [], artifacts: [], importedFiles: [], error: null, ...extra,
-    });
+    let finalResult: SandboxTaskRunResult | null = null;
+    let cleanup: "complete" | "failed" = "complete";
+    const finish = (status: SandboxTaskFinalStatus, extra: Partial<SandboxTaskRunResult> = {}): SandboxTaskRunResult => {
+      finalResult = {
+        executionId, finalStatus: status, startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startMs,
+        kiloExitCode: null, kiloVersion: null, model, agent, providerRequests: 0, toolEvidence: [], artifacts: [],
+        importedFiles: [], error: null, cleanup: "complete", ...extra,
+      };
+      return finalResult;
+    };
 
     if (!/^[0-9a-f-]{36}$/i.test(executionId)) return finish("FAILED", { error: "executionId must be a UUID" });
     const readiness = this.readiness();
@@ -507,6 +541,7 @@ export class WindowsSandboxTaskRunner {
       const wsb = path.join(runRoot, "execution.wsb");
       fs.writeFileSync(wsb, buildWsb(inbox, outbox, bootstrap, executionId, timeoutMs), { encoding: "utf8", flag: "wx" });
 
+      const launchStartedAt = Date.now();
       relay.start();
       const launched = await runProcess(this.sandboxExe, [wsb], {
         cwd: runRoot, timeoutMs: timeoutMs + 120_000, windowsHide: true,
@@ -527,7 +562,12 @@ export class WindowsSandboxTaskRunner {
         });
       }
       const stat = fs.lstatSync(resultFile);
-      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("guest result is not a regular file");
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_MANIFEST_BYTES) {
+        throw new Error("guest result manifest is not a regular file or exceeds the size limit");
+      }
+      if (stat.mtimeMs < launchStartedAt - 2000) {
+        throw new Error("guest result manifest predates this Sandbox launch");
+      }
       manifest = JSON.parse(fs.readFileSync(resultFile, "utf8")) as GuestManifest;
       const validation = validateSandboxTaskManifest(manifest, executionId);
       if (!validation.ok) {
@@ -557,7 +597,12 @@ export class WindowsSandboxTaskRunner {
       });
     } finally {
       if (relay) await relay.stop().catch(() => undefined);
-      try { if (fs.existsSync(runRoot)) fs.rmSync(runRoot, { recursive: true, force: true }); } catch { /* best effort */ }
+      try {
+        if (fs.existsSync(runRoot)) fs.rmSync(runRoot, { recursive: true, force: true });
+      } catch {
+        cleanup = "failed";
+      }
+      if (finalResult) finalResult.cleanup = cleanup;
     }
   }
 
