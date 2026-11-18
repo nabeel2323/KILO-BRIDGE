@@ -97,18 +97,38 @@ test("db: GitHub intake claims are unique, durable, and updateable", async () =>
   removeDir(dir);
 });
 
-test("db: mutations survive crash (persist-on-write, no close)", async () => {
+test("db: stale snapshots fail closed and cannot overwrite a newer process write", async () => {
   const { store, dir, dbPath } = await openStore();
-  const task = makeTaskRecord({ leaseHolder: "worker-1", leaseExpiresAt: new Date(Date.now() + 60000).toISOString() });
-  store.upsertTask(task);
-  // Simulate crash: do NOT close. A fresh store must see the persisted lease.
-  const store2 = new SqliteStore(dbPath);
-  await store2.open();
-  const recovered = store2.getTask(task.id);
-  assert.ok(recovered, "task must survive without close()");
-  assert.equal(recovered!.leaseHolder, "worker-1");
-  store2.close();
+  const firstTask = makeTaskRecord({
+    id: "task-first-writer",
+    leaseHolder: "worker-1",
+    leaseExpiresAt: new Date(Date.now() + 60000).toISOString(),
+  });
+  store.upsertTask(firstTask);
+
+  // A second Bridge process opens the same persisted snapshot and commits a change.
+  const secondStore = new SqliteStore(dbPath);
+  await secondStore.open();
+  const secondTask = makeTaskRecord({ id: "task-second-writer", issueNumber: 43 });
+  secondStore.upsertTask(secondTask);
+
+  // The first process still has an older in-memory export. It must not replace
+  // the newer file or continue serving stale reads after detecting the conflict.
+  assert.throws(
+    () => store.upsertTask(makeTaskRecord({ id: "task-stale-write", issueNumber: 44 })),
+    /database changed since this process loaded it|database writer lock unavailable/
+  );
+  assert.throws(() => store.listTasksByStatuses(["READY"]), /database snapshot is stale/);
+
   store.close();
+  secondStore.close();
+
+  const recovered = new SqliteStore(dbPath);
+  await recovered.open();
+  assert.ok(recovered.getTask(firstTask.id), "the first committed task remains present");
+  assert.ok(recovered.getTask(secondTask.id), "the second committed task remains present");
+  assert.equal(recovered.getTask("task-stale-write"), null, "the stale write must never reach disk");
+  recovered.close();
   removeDir(dir);
 });
 
