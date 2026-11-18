@@ -2,8 +2,10 @@
 
 import path from "node:path";
 import fs from "node:fs";
+import crypto from "node:crypto";
 import { z } from "zod";
 import type { ProjectConfig } from "./types";
+import { ExclusiveProcessLock } from "./components/processLock";
 
 export const BridgeConfigSchema = z.object({
   dataDir: z.string().default("C:\\TAIF\\KILO-BRIDGE\\data"),
@@ -51,7 +53,30 @@ export function loadBridgeConfig(bridgeRoot: string): BridgeConfig {
 
 export function saveBridgeConfig(bridgeRoot: string, config: BridgeConfig): void {
   const file = resolveConfigPath(bridgeRoot);
-  fs.writeFileSync(file, JSON.stringify(config, null, 2), "utf8");
+  const dir = path.dirname(file);
+  fs.mkdirSync(dir, { recursive: true });
+  const lock = new ExclusiveProcessLock(
+    file + ".lock",
+    "bridge-config:" + process.pid + ":" + crypto.randomUUID()
+  );
+  const acquired = lock.acquire();
+  if (!acquired.ok) {
+    throw new Error("could not safely update bridge.config.json: " + acquired.error);
+  }
+  const temp = file + "." + process.pid + "." + crypto.randomUUID() + ".tmp";
+  try {
+    const fd = fs.openSync(temp, "wx", 0o600);
+    try {
+      fs.writeFileSync(fd, JSON.stringify(config, null, 2), "utf8");
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(temp, file);
+  } finally {
+    try { if (fs.existsSync(temp)) fs.unlinkSync(temp); } catch { /* best effort cleanup */ }
+    lock.release();
+  }
 }
 
 export function ensureBridgeConfig(bridgeRoot: string): BridgeConfig {
