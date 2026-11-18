@@ -1,7 +1,7 @@
 # GitHub Control Center and Intake — Implementation Progress
 
 **Tracker version:** 1.0  
-**Status:** PARTIAL — Phase 0.1 source changes committed; runtime verification pending  
+**Status:** IN PROGRESS — Phase 0 safety remediation partially committed; Phase 1 configuration gate introduced; Windows CI pending  
 **Repository:** `nabeel2323/KILO-BRIDGE`  
 **Branch:** `v1-implementation`  
 **Baseline commit reviewed:** `e3ecd61d5eb77befcb8169069019d9f44b7cf769`  
@@ -14,8 +14,8 @@
 
 | Phase | Description | Status | Completion |
 |---|---|---|---:|
-| 0 | Repository boundary, baseline, and safety remediation | PARTIAL | 45% |
-| 1 | Configuration and durable data contracts | NOT STARTED | 0% |
+| 0 | Repository boundary, baseline, and safety remediation | PARTIAL | 60% |
+| 1 | Configuration and durable data contracts | IN PROGRESS | 30% |
 | 2 | Dedicated GitHub intake service | NOT STARTED | 0% |
 | 3 | Shared execution, evidence, and GitHub reconciliation | NOT STARTED | 0% |
 | 4 | Control Center backend and security | NOT STARTED | 0% |
@@ -23,7 +23,7 @@
 | 6 | Integration, hardening, and independent verification | NOT STARTED | 0% |
 | 7 | Documentation and release readiness | NOT STARTED | 0% |
 
-**Overall completion:** 8% (planning files and one Phase 0.1 safety slice are committed; no implementation phase is complete).
+**Overall completion:** 13% (roadmap, progress tracker, Phase 0 SCS-bootstrap removal, independent intake configuration gate, initial CI workflow, and related documentation changes are committed; no implementation phase is complete).
 
 ## 2. Confirmed repository baseline
 
@@ -41,8 +41,8 @@
 
 | ID | Severity | Finding | Required action | Status |
 |---|---|---|---|---|
-| KB-IMPL-001 | CRITICAL | `KiloBridgeApp.init()` previously defaulted `registerScs=true`; CLI initialization enabled registration for the default Bridge root and contained a hard-coded `scs-platform` mapping. | Remove implicit project registration; make init neutral; preserve existing project records; never open the SCS path. | SOURCE CHANGES COMMITTED — UNVERIFIED |
-| KB-IMPL-002 | HIGH | No dedicated `githubIntakeEnabled` setting exists in `src/config.ts`. | Add false-by-default config gate and independent tests. | OPEN |
+| KB-IMPL-001 | CRITICAL | `KiloBridgeApp.init()` previously defaulted `registerScs=true`; CLI initialization enabled registration for the default Bridge root and contained a hard-coded `scs-platform` mapping. SCS-specific example and operational references also existed in Kilo Bridge. | Remove implicit project registration; make init neutral; preserve existing project records; never open the SCS path. | SOURCE CHANGES COMMITTED — CI PENDING |
+| KB-IMPL-002 | HIGH | Dedicated intake gate and repository trust allowlist were absent from the configuration schema. | Add false-by-default gate, empty-by-default allowlist, and independent tests. | PARTIAL — CONFIG + TEST SOURCE COMMITTED; CI PENDING |
 | KB-IMPL-003 | HIGH | Existing `Worker` combines polling, claim labels, correction processing, and execution. | Extract shared execution from discovery; do not use Worker as the new intake service. | OPEN |
 | KB-IMPL-004 | HIGH | SQL.js writes whole database exports; current task idempotency lookup is project/Issue scoped and index is non-unique. | Design cross-process serialization and repository-scoped unique claims before parallel intake is allowed. | OPEN |
 | KB-IMPL-005 | HIGH | No local Control Center server/UI was found in the inspected app/CLI baseline. | Add authenticated loopback server, API, and UI in isolated layers. | OPEN |
@@ -57,6 +57,7 @@
 - [x] Add CLI regression assertions for an empty registry after init and no SCS doctor check (authored; not yet executed).
 - [ ] Audit all generic-worker execution and GitHub mutation paths when `workerEnabled=false`.
 - [ ] Add regression tests for disabled-worker execution/recovery/correction paths.
+- [x] Remove the SCS-specific sample project configuration from Kilo Bridge; generic Node/Django/Laravel/etc. project examples remain.
 - [ ] Confirm fixtures use only disposable local repositories and fake GitHub endpoints.
 - [ ] Execute baseline `pnpm typecheck`, `pnpm test`, and `pnpm build` on the Windows development environment; capture exact counts/results.
 
@@ -64,13 +65,14 @@
 
 ### Phase 1 — Configuration and durable data contracts
 
-- [ ] Add `githubIntakeEnabled: false` to schema/defaults.
-- [ ] Add explicit trusted repository allowlist, default empty.
-- [ ] Keep `workerEnabled` unchanged and separately exposed.
+- [x] Add `githubIntakeEnabled: false` to schema/defaults (commit `219caa4`).
+- [x] Add explicit `githubIntakeAllowedRepositories`, default empty, with owner/repo validation and duplicate rejection.
+- [x] Keep `workerEnabled` unchanged and separately exposed; CLI tests assert intake configuration does not enable the worker.
+- [x] Add CLI configuration support for the boolean gate and JSON-array repository allowlist.
 - [ ] Design and implement forward-only DB migration (current schema v4).
 - [ ] Implement durable assignment/claim identity and reconciliation state.
 - [ ] Add cross-process intake lock and unique-claim tests.
-- [ ] Test fresh config and old config/database upgrade behavior.
+- [ ] Execute fresh/legacy config tests and old database migration tests on Windows CI.
 
 ### Phase 2 — Dedicated GitHub intake
 
@@ -117,6 +119,7 @@
 
 - [ ] Add deterministic unit and provider-fixture tests.
 - [ ] Add migration/restart/concurrency tests.
+- [x] Add Windows CI workflow for typecheck/build/test (workflow run pending; no result claimed).
 - [ ] Add prompt-injection and workspace-boundary tests.
 - [ ] Test only against dedicated disposable GitHub repository or controlled fixtures.
 - [ ] Run one actual native Kilo + Windows Sandbox task in the disposable test environment.
@@ -139,8 +142,10 @@
 |---|---|---|---|---|
 | 2026-11-19 | 0 | GitHub repository and branch inspection | PASS | Repository `nabeel2323/KILO-BRIDGE`, branch `v1-implementation`, baseline `e3ecd61d5eb77befcb8169069019d9f44b7cf769`. |
 | 2026-11-19 | 0 | Source inspection | PARTIAL | Key source files inspected; identified default SCS registration, missing intake gate, coupled worker flow, schema v4. |
-| 2026-11-19 | 0 | Runtime build/test execution | NOT RUN | GitHub source connector does not execute commands on the operator's Windows machine. No build, test, or guest-run result is claimed for this session. |
-| 2026-11-19 | 0 | Phase 0.1 source update | PARTIAL | Commit `d9fb2093c16d4ad74367f2900b62c032d2ca7d4f`: removed app-level SCS auto-registration and doctor check; removed CLI SCS defaults and updated CLI regression expectations. No compile/test execution is claimed. |
+| 2026-11-19 | 0 | Runtime build/test execution | PENDING CI | Windows CI workflow added; the first GitHub Actions run is in progress. No passing build/test result is claimed yet. |
+| 2026-11-19 | 0 | Phase 0.1 source update | PARTIAL | Commit `d9fb2093c16d4ad74367f2900b62c032d2ca7d4f`: removed app-level SCS auto-registration and doctor check; removed CLI SCS defaults and updated CLI regression expectations. Runtime verification is pending CI. |
+| 2026-11-19 | 1 | Intake gate + allowlist configuration | SOURCE COMMITTED | Commit `219caa499c0c40d893dd737f611f74a8754fb2e0`: added `githubIntakeEnabled=false`, empty repo allowlist, Zod validation, CLI configuration, doctor diagnostics, tests, and docs. Test results pending CI. |
+| 2026-11-19 | 6 | Windows CI workflow | IN PROGRESS | Workflow added at `.github/workflows/ci.yml` in commit `6fe896474782150ccc33336b4113d94986c7f879`; first run `44410668487` was reported in progress at last check. |
 
 ### Runtime evidence inherited from earlier operator verification
 
@@ -151,12 +156,14 @@ The earlier project conversation reported that native Kilo integration scenarios
 | Date | Change | Evidence |
 |---|---|---|
 | 2026-11-19 | Created phased implementation plan and progress tracker. | Plan and tracker files in `docs/`. |
-| 2026-11-19 | Removed implicit SCS project registration and SCS CLI defaults. | `d9fb2093c16d4ad74367f2900b62c032d2ca7d4f`; runtime verification pending. |
+| 2026-11-19 | Removed implicit SCS project registration and SCS CLI defaults. | `d9fb2093c16d4ad74367f2900b62c032d2ca7d4f`; CI verification pending. |
+| 2026-11-19 | Added independent GitHub intake config gate and empty trusted-repository allowlist. | `219caa499c0c40d893dd737f611f74a8754fb2e0`; CLI/config tests authored, CI pending. |
+| 2026-11-19 | Added Windows CI workflow and removed SCS-specific sample project config. | Workflow `6fe896474782150ccc33336b4113d94986c7f879`; sample removal `9e7c1c9af8e758dca4f6fba1afa41c138a351315`. |
 | 2026-11-19 | Recorded source-level safety findings KB-IMPL-001 through KB-IMPL-006. | Files inspected at baseline commit `e3ecd61d5eb77befcb8169069019d9f44b7cf769`. |
 
 ## 8. Current next implementation slice
 
-**Phase 0.2 — Audit generic-worker disabled-state behavior and verify Phase 0.1 on Windows.**
+**Phase 0.2 — Audit generic-worker disabled-state behavior and resolve any Windows CI regressions.**
 
 Required files likely include:
 - `src/app.ts`

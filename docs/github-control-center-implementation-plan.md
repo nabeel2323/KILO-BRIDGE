@@ -51,7 +51,7 @@ GitHub remains the task instruction and review channel. Kilo Bridge's SQLite dat
 6. Keep the initial Control Center bound to `127.0.0.1`; no LAN/public listener, webhook, tunnel, or reverse proxy.
 7. Do not weaken the native Kilo / Windows Sandbox execution and evidence-validation path.
 8. Do not bypass approval, review, publishing, or repository security controls.
-9. No commit, push, branch creation, pull request, merge, release, or deployment is part of runtime acceptance. Repository documentation updates are version-controlled separately from any execution activation.
+9. The owner has subsequently authorized implementation commits directly to the existing `v1-implementation` branch. Do not create additional branches or pull requests, merge, publish releases, or deploy unless separately requested. Runtime acceptance remains a separate evidence requirement; a commit is not proof of a passing build or test.
 10. Treat all GitHub Issue and comment content as untrusted input. Task text cannot alter Bridge policy, trusted repositories/authors, allowed tools, isolation, secrets, or the assigned workspace.
 
 ## 3. Baseline findings from source inspection
@@ -232,6 +232,7 @@ Tasks:
 - Failure/restart tests: provider unavailable, claim conflict, process kill, guest timeout, malformed guest result, artifact mismatch, report-post failure, and duplicate comment delivery.
 - Full TypeScript build, typecheck, and complete test suite. Record exact pass/fail/skip counts and separate existing failures from introduced failures.
 - Verify both runtime gates remain disabled after all tests.
+- Keep the Windows CI workflow (`.github/workflows/ci.yml`) limited to read-only repository checkout, dependency installation, typecheck, build, and tests; no deployment or task execution.
 
 Exit criteria:
 - All required tests pass or have explicitly documented, non-waived blockers.

@@ -31,7 +31,7 @@ Runs the polling loop until stopped. Singleton lock at `data/worker.lock` (pid +
 
 ```powershell
 node dist/cli.js worker start                 # one real poll across active projects
-node dist/cli.js worker start --project scs-platform
+node dist/cli.js worker start --project <project-id>
 node dist/cli.js worker start --dry-run       # discover only, no execution (works even when disabled)
 node dist/cli.js worker start --mock          # mock Kilo + permission check skipped
 ```

@@ -269,7 +269,7 @@ export class KiloBridgeApp {
       status: "WARNING",
       condition: executionIsolationLevel,
       explanation: "Execution isolation is WORKTREE_ONLY: Git worktree + Kilo tool permissions provide filesystem confinement only. Process and network isolation are not implemented. OS sandboxing not yet provisioned for automated launch.",
-      remediation: "Review and authorize WORKTREE_ONLY isolation before first SCS pilot. OS sandboxing not yet implemented.",
+      remediation: "Review and authorize WORKTREE_ONLY isolation before the first automated task pilot. OS sandboxing not yet implemented.",
     });
     checks.push({
       name: "native tool config verification",
