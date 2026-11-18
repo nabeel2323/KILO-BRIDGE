@@ -15,15 +15,15 @@
 | Phase | Description | Status | Completion |
 |---|---|---|---:|
 | 0 | Repository boundary, baseline, and safety remediation | PARTIAL | 85% |
-| 1 | Configuration and durable data contracts | IN PROGRESS | 70% |
+| 1 | Configuration and durable data contracts | IN PROGRESS | 80% |
 | 2 | Dedicated GitHub intake service | PARTIAL | 35% |
 | 3 | Shared execution, evidence, and GitHub reconciliation | IN PROGRESS | 10% |
-| 4 | Control Center backend and security | IN PROGRESS | 45% |
-| 5 | Control Center UI and live operations | PARTIAL | 30% |
-| 6 | Integration, hardening, and independent verification | PARTIAL | 10% |
-| 7 | Documentation and release readiness | NOT STARTED | 0% |
+| 4 | Control Center backend and security | IN PROGRESS | 70% |
+| 5 | Control Center UI and live operations | PARTIAL | 50% |
+| 6 | Integration, hardening, and independent verification | PARTIAL | 15% |
+| 7 | Documentation and release readiness | PARTIAL | 15% |
 
-**Overall completion:** approximately 30% (repository safety remediation, independent intake gate, schema-v5 durable claims, fail-closed intake source, SQL.js stale-snapshot protection, authenticated loopback Control Center server, database-backed read APIs, initial browser UI, CLI setup/start commands, operations documentation, and regression tests are committed. Database and Control Center tests are authored but the new commits do not yet have verified CI execution evidence. No end-to-end GitHub intake dispatch or generalized Sandbox task execution is complete).
+**Overall completion:** approximately 36% (repository safety remediation, independent intake gate, schema-v5 durable claims, fail-closed intake source, SQL.js stale-snapshot protection, locked atomic configuration updates, authenticated loopback Control Center server, database-backed read APIs, initial browser UI, audited project/trust/polling controls, CLI integration, operations documentation, and regression tests are committed. New database, Control Center, and config changes remain unverified by a current CI/test execution result. No end-to-end GitHub intake dispatch or generalized Sandbox task execution is complete).
 
 ## 2. Confirmed repository baseline
 
@@ -44,10 +44,10 @@
 | KB-IMPL-001 | CRITICAL | `KiloBridgeApp.init()` previously defaulted `registerScs=true`; CLI initialization enabled registration for the default Bridge root and contained a hard-coded `scs-platform` mapping. SCS-specific example and operational references also existed in Kilo Bridge. | Remove implicit project registration; make init neutral; preserve existing project records; never open the SCS path. | SOURCE + REGRESSION TESTS VERIFIED IN CI |
 | KB-IMPL-002 | HIGH | Dedicated intake gate and repository trust allowlist were absent from the configuration schema. | Add false-by-default gate, empty-by-default allowlist, and independent tests. | CONFIG SOURCE + GATE REGRESSION VERIFIED IN CI; INTAKE END-TO-END OPEN |
 | KB-IMPL-003 | HIGH | Existing `Worker` combines polling, claim labels, correction processing, and execution. | Extract shared execution from discovery; do not use Worker as the new intake service. | OPEN — execution pipeline extraction still required |
-| KB-IMPL-004 | CRITICAL | `SqliteStore` uses in-memory `sql.js` snapshots. A stale process could previously export over newer file state even with a unique claim index. | Serialize file replacement with an exclusive lock, compare the on-disk SHA-256 with the loaded snapshot, atomically replace via a same-directory temporary file, and invalidate stale instances on conflict. Add true child-process and restart tests before enabling intake. | CODE + REGRESSION TEST COMMITTED (`b3af31f`, `3be9bea`); WINDOWS CI / MULTI-PROCESS RUNTIME EVIDENCE PENDING |
+| KB-IMPL-004 | CRITICAL | `SqliteStore` uses in-memory `sql.js` snapshots. A stale process could previously export over newer file state even with a unique claim index. | Serialize file replacement with an exclusive lock, compare the on-disk SHA-256 with the loaded snapshot, atomically replace via a same-directory temporary file, and invalidate stale instances on conflict. Add true child-process and restart tests before enabling intake. | STALE-WRITER GUARD + IN-PROCESS / CHILD-PROCESS TEST SOURCE COMMITTED (`b3af31f`, `3be9bea`, `0d57999`); TEST EXECUTION PENDING |
 | KB-IMPL-007 | CRITICAL | `launchWindowsSandbox()` is a fixed fixture-based smoke harness, while `Worker.executeTask()` launches Kilo directly on the host. No production task execution is currently wired through a generalized Windows Sandbox runner. | Implement a per-execution Windows Sandbox task runner, secure provider connectivity, guest evidence validation, artifact/diff collection, and fail-closed behavior. Until then, production isolated auto-execution is NOT READY. | OPEN |
 | KB-IMPL-008 | HIGH | The hosted Windows CI runner does not have the user's configured native Kilo installation or a provisioned Windows Sandbox runtime. Five environment-dependent tests skip; green CI is not evidence of a real guest task. | Preserve skips as skips; run native Kilo and real Sandbox verification on the user's Windows machine after general task runner implementation, using only a disposable test repo. | OPEN |
-| KB-IMPL-005 | HIGH | No local Control Center existed in the inspected baseline. | Add authenticated loopback server, read APIs, UI, audited settings APIs, and live updates. | LOOPBACK SERVER + READ APIs + INITIAL UI + CLI + TEST SOURCE COMMITTED; TEST EXECUTION / SETTINGS MUTATIONS / SSE OPEN |
+| KB-IMPL-005 | HIGH | No local Control Center existed in the inspected baseline. | Add authenticated loopback server, read APIs, UI, audited settings APIs, and live updates. | LOOPBACK SERVER + READ APIs + UI + AUDITED PROJECT/TRUST/POLLING CONTROLS + CLI + DOCS + TEST SOURCE COMMITTED; CI / BROWSER / SSE OPEN |
 | KB-IMPL-006 | MEDIUM | GitHub source access does not execute arbitrary commands on the operator's Windows machine. | Use Windows CI for code regression and reserve actual native Kilo/Sandbox verification for the user's machine. | CI path established; host verification still open |
 
 ## 4. Phase 0 checklist — safety and baseline
@@ -112,8 +112,10 @@
 - [x] Add request-size limits, login throttling, CSP/security headers, safe errors, and non-loopback rejection (commits `197cea3`, `fdc1716`).
 - [x] Add data APIs for dashboard, projects, task pages/detail, executions, verifications, intake claims, settings view, and audit read model (commit `197cea3`; bounded task-page DB method `3a18cd4`).
 - [x] Omit local filesystem paths, claim tokens, raw audit detail, and secret-like error values from read models.
-- [ ] Add audited operator configuration mutation APIs and route-specific authorization policy.
-- [ ] Execute the Control Center security tests on Windows CI and verify cookie/browser behavior on the local Windows host.
+- [x] Add audited configuration updates for repository allowlist and polling interval; gate updates may disable but never enable either autonomous executor (commit `1309711`).
+- [x] Add audited project enable/disable route protected by session, Origin, and CSRF checks (commit `1309711`).
+- [x] Use a cross-process lock + atomic rename for config updates; CLI configuration now uses the locked read-modify-write helper (commits `954a3fb`, `d4d95f1`, `0762db8`).
+- [ ] Execute the Control Center security and config-concurrency tests on Windows CI and verify cookie/browser behavior on the local Windows host.
 
 ### Phase 5 — Control Center UI/live operations
 
@@ -121,15 +123,16 @@
 - [x] Implement project and trusted-author read view (filesystem paths omitted).
 - [x] Implement persisted GitHub intake claim queue.
 - [x] Implement task detail with body, lifecycle, execution, verification, and report summaries.
-- [x] Implement read-only review center and audit view.
-- [x] Implement read-only settings view that states intake runtime is unavailable and does not enable either gate.
-- [ ] Implement audited project/trust configuration changes and intake gate settings after dispatcher safeguards are in place.
+- [x] Implement review center and audit view (read-only for task approval/publication).
+- [x] Implement UI controls for project enable/disable with an audit entry.
+- [x] Implement UI for trusted repository list and polling interval; automation gates can be disabled but cannot be enabled from the UI (commit `8c9359c`).
 - [ ] Implement SSE or replay-safe polling/live updates; initial UI currently refreshes on demand.
 - [ ] Verify empty, failed, blocked, report-ready, large-list, and responsive states on a browser.
 
 ### Phase 6 — Integration and independent verification
 
-- [x] Author Control Center tests for one-time token, password hashing, session issuance, loopback bind, authentication, Origin/CSRF, DB read models, path omission, and fail-closed settings mutation (`tests/control-center.test.ts`, commit `2502b05`).
+- [x] Author Control Center tests for one-time token, password hashing, session issuance, loopback bind, authentication, Origin/CSRF, DB read models, path omission, and fail-closed settings mutation (`2502b05`).
+- [x] Add tests for audited repository/polling settings and project enable/disable (`a789fc5`).
 - [x] Author separate-process SQL.js stale-writer regression (`tests/db.test.ts`, commit `0d57999`).
 - [ ] Execute new Control Center/database tests and capture exact pass/fail/skip results.
 - [ ] Add migration/restart/concurrency tests beyond current test coverage.
@@ -146,7 +149,8 @@
 - [ ] Update architecture and developer guide.
 - [ ] Update installation, configuration, and authentication instructions.
 - [x] Add Control Center first-run, security, usage, limitations, and troubleshooting guide (`docs/control-center-operations.md`, commit `8ca8f0f`); link from README (commit `80a6e5e`).
-- [ ] Update remaining operations, security, recovery, troubleshooting, and testing guides.
+- [x] Update Control Center operations guide for audited controls, configuration locking, and actual limitations (`472af95`).
+- [ ] Update remaining architecture, security, recovery, troubleshooting, and testing guides.
 - [ ] Update release notes and operator enablement/disablement procedure.
 - [ ] Record limitations, rollback, and recovery steps.
 - [ ] Complete final release-gate report with separate implementation/test/runtime evidence.
@@ -166,6 +170,8 @@
 | 2026-11-19 | 1 | SQL.js stale-snapshot persistence guard | SOURCE + TEST COMMITTED; TEST EXECUTION PENDING | Commits `b3af31f` and `3be9bea`: exclusive persistence lock, SHA-256 compare-and-swap guard, same-directory temp file + rename, no close-time snapshot export, stale-instance refusal, and stale-writer regression test. Connected GitHub status endpoint returned no statuses for latest commit and exposed no push-triggered workflow run; no local Windows execution was performed. |
 | 2026-11-19 | 1 | Separate-process stale writer regression | TEST SOURCE COMMITTED; EXECUTION PENDING | Commit `0d57999` spawns a separate Node process against the same SQL.js file, writes through a distinct process snapshot, then verifies the parent stale writer is rejected and the child's committed value survives reopen. Windows CI result is not yet available through the connected status/run endpoints. |
 | 2026-11-19 | 4/5 | Local Control Center backend and initial UI | SOURCE + TESTS + DOCS COMMITTED; TEST EXECUTION PENDING | Server/read-model/CLI/UI commits: `197cea3`, `fdc1716`, `8772b65`, `d20a938`, `1f8377e`; tests `2502b05`; task paging `3a18cd4`; operator guide `8ca8f0f`; README link `80a6e5e`. Auth is one-time-token + scrypt + in-memory session; loopback/Host/Origin/CSRF/request limit/CSP protections are implemented in source. UI is read-only and explicitly reports intake runtime unavailable. No CI/test execution is claimed for these commits. |
+| 2026-11-19 | 1/4 | Atomic configuration updates | SOURCE COMMITTED; TEST EXECUTION PENDING | Commit `954a3fb` adds a locked read-modify-write helper, same-directory temp file + fsync + atomic rename; commits `d4d95f1` and `0762db8` route CLI config changes and initialization through the helper. Settings API uses the same helper. |
+| 2026-11-19 | 4/5 | Audited Control Center operator controls | SOURCE + TESTS + DOCS COMMITTED; TEST EXECUTION PENDING | Commits `1309711`, `8c9359c`, `a789fc5`, `472af95`: project enable/disable; trusted repository allowlist and poll interval updates; audit events; API rejects attempts to enable `workerEnabled` or `githubIntakeEnabled`; UI updated; docs now describe actual behavior. No new CI/test result has been retrieved. |
 
 ### Runtime evidence inherited from earlier operator verification
 
@@ -189,7 +195,7 @@ The SQL.js writer guard and separate-process regression source are committed, bu
 
 The production-execution blocker remains `WindowsSandboxTaskRunner`: current `launchWindowsSandbox()` is a fixture smoke harness, while generic worker execution still launches Kilo on the host. The next slice must stage a real per-execution worktree and task spec, launch the native Kilo runtime in a disposable guest, provide narrowly scoped provider connectivity without copying long-lived credentials, validate a matching execution-ID result manifest and artifact hashes, import only safe workspace changes, and clean up fail-closed on any missing evidence.
 
-The Control Center backend/UI are a read-only foundation. The next web slice after execution wiring is audited settings mutation, SSE/replay, and browser-level verification.
+The Control Center backend/UI are now a limited operator surface: project enable/disable and trusted-repository/polling configuration are auditable; neither automation gate can be enabled from the UI. The next web slice is SSE/replay and browser-level verification. The critical execution blocker remains a generalized Windows Sandbox runner and a real production-isolated dispatcher.
 
 Required files likely include:
 - `src/components/isolation.ts`
