@@ -73,7 +73,7 @@ Add `--json` to any command for structured automation output.
 - [GitHub authentication](docs/github-authentication.md) · [Kilo CLI integration](docs/kilo-cli-integration.md)
 - [Multi-project registration](docs/multi-project-registration.md) · [Task lifecycle](docs/task-lifecycle.md)
 - [Security model](docs/security-model.md) · [Operations manual](docs/operations-manual.md)
-- [Recovery & troubleshooting](docs/recovery-troubleshooting.md) · [Developer guide](docs/developer-guide.md)
+- [Recovery & troubleshooting](docs/recovery-troubleshooting.md) · [Developer guide](docs/developer-guide.md) · [Control Center operations](docs/control-center-operations.md)
 - [Testing guide](docs/testing-guide.md) · [Release notes](docs/release-notes.md) · [E2E test report](docs/e2e-test-report.md)
 
 ## Safety guarantees
