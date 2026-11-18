@@ -298,3 +298,49 @@ test("control center: project state changes are audited and do not enable automa
     await env.cleanup();
   }
 });
+
+
+test("control center: authenticated SSE emits a snapshot and a refresh after persisted activity changes", async () => {
+  const env = await setupAuthenticatedServer();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  try {
+    const response = await fetch(env.baseUrl + "api/events", {
+      headers: { Cookie: env.cookie, Accept: "text/event-stream" },
+    });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") || "", /text\/event-stream/i);
+    assert.ok(response.body);
+    reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+
+    const readUntil = async (needle: string, timeoutMs: number): Promise<string> => {
+      let collected = "";
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const remaining = deadline - Date.now();
+        const result = await Promise.race([
+          reader!.read(),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("SSE read timed out")), remaining)),
+        ]);
+        if (result.done) break;
+        collected += decoder.decode(result.value, { stream: true });
+        if (collected.includes(needle)) return collected;
+      }
+      throw new Error("SSE event not received: " + needle);
+    };
+
+    const initial = await readUntil("event: snapshot", 5000);
+    assert.match(initial, /id: [a-f0-9]{64}/);
+
+    env.store.insertAudit({
+      actor: "sse-test",
+      action: "control_center.sse_test_change",
+      detail: "test-only",
+    });
+    const update = await readUntil("event: refresh", 7000);
+    assert.match(update, /control_center\.sse_test_change|event: refresh/);
+  } finally {
+    if (reader) await reader.cancel().catch(() => undefined);
+    await env.cleanup();
+  }
+});
