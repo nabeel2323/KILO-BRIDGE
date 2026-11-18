@@ -4,8 +4,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import vm from "node:vm";
+import { spawnSync } from "node:child_process";
 import { BridgeConfigSchema } from "../src/config";
 import {
+  buildGuestBootstrap,
+  buildGuestProviderBridge,
+  buildWsb,
   normalizeSandboxArtifactPath,
   validateSandboxTaskManifest,
   WindowsSandboxTaskRunner,
@@ -63,6 +68,12 @@ test("sandbox runner: accepts safe relative artifact paths and rejects path esca
   assert.equal(normalizeSandboxArtifactPath("node_modules/pkg/index.js"), null);
   assert.equal(normalizeSandboxArtifactPath(".git/config"), null);
   assert.equal(normalizeSandboxArtifactPath("src/CON.txt"), null);
+  assert.equal(normalizeSandboxArtifactPath("src/file.txt:secret"), null);
+  assert.equal(normalizeSandboxArtifactPath("src/trailing."), null);
+  assert.equal(normalizeSandboxArtifactPath("src/trailing "), null);
+  assert.equal(normalizeSandboxArtifactPath(".ssh/id_ed25519"), null);
+  assert.equal(normalizeSandboxArtifactPath("project/.aws/credentials"), null);
+  assert.equal(normalizeSandboxArtifactPath(".kilo-bridge-task.md"), null);
 });
 
 test("sandbox runner: validates a completed guest manifest with native tool evidence and artifact digests", () => {
@@ -138,6 +149,68 @@ test("sandbox runner: dedicated gate defaults off and prevents any execution sta
     assert.ok(result.error?.includes("sandboxExecutionEnabled is false"));
     assert.equal(fs.existsSync(path.join(root, "data", "sandbox-runs")), false);
     assert.equal(fs.readFileSync(path.join(worktree, "README.md"), "utf8"), "test");
+  } finally {
+    removeDir(root);
+  }
+});
+
+
+test("sandbox runner: generated provider relay is valid JavaScript and exposes only the expected protocol", () => {
+  const source = buildGuestProviderBridge();
+  assert.doesNotThrow(() => new vm.Script(source));
+  assert.match(source, /\/health/);
+  assert.match(source, /\/v1\/models/);
+  assert.match(source, /\/v1\/chat\/completions/);
+  assert.match(source, /127\.0\.0\.1/);
+  assert.doesNotMatch(source, /0\.0\.0\.0/);
+});
+
+test("sandbox runner: generated guest bootstrap parses and WSB XML preserves network isolation on Windows", {
+  skip: process.platform !== "win32",
+}, () => {
+  const root = makeTempDir("sandbox-generated-scripts-");
+  try {
+    const bootstrapPath = path.join(root, "bootstrap.ps1");
+    const wsbPath = path.join(root, "execution.wsb");
+    const validatorPath = path.join(root, "validate-generated.ps1");
+    const executionId = EXECUTION_ID;
+    fs.writeFileSync(bootstrapPath, buildGuestBootstrap(), "utf8");
+    fs.writeFileSync(
+      wsbPath,
+      buildWsb(
+        "C:\\Bridge\\Sandbox Runs\\inbox & tools",
+        "C:\\Bridge\\Sandbox Runs\\outbox",
+        "C:\\Bridge\\Sandbox Runs\\inbox & tools\\bootstrap.ps1",
+        executionId,
+        60_000
+      ),
+      "utf8"
+    );
+    fs.writeFileSync(validatorPath, String.raw`param([string]$BootstrapPath,[string]$WsbPath)
+$ErrorActionPreference = "Stop"
+$tokens = $null
+$errors = $null
+[System.Management.Automation.Language.Parser]::ParseFile($BootstrapPath,[ref]$tokens,[ref]$errors) | Out-Null
+if ($errors.Count -gt 0) {
+  $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }
+  exit 11
+}
+[xml]$doc = Get-Content -LiteralPath $WsbPath -Raw
+if ($doc.Configuration.Networking -ne "Disable") { exit 12 }
+$folders = @($doc.Configuration.MappedFolders.MappedFolder)
+if ($folders.Count -ne 2) { exit 13 }
+if ($folders[0].ReadOnly -ne "true" -or $folders[1].ReadOnly -ne "false") { exit 14 }
+if (-not $doc.Configuration.LogonCommand.Command) { exit 15 }
+exit 0
+`, "utf8");
+
+    const result = spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", validatorPath, bootstrapPath, wsbPath],
+      { encoding: "utf8", windowsHide: true, timeout: 20_000 }
+    );
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.status, 0, result.stdout + "\\n" + result.stderr);
   } finally {
     removeDir(root);
   }
