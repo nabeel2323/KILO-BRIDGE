@@ -564,11 +564,11 @@ export class ControlCenterServer {
     response.setHeader("Connection", "keep-alive");
     response.setHeader("X-Accel-Buffering", "no");
     response.flushHeaders();
-    response.write("retry: 3000\\n\\n");
+    response.write("retry: 3000\n\n");
     response.write(
-      "id: " + revision + "\\n" +
-      "event: snapshot\\n" +
-      "data: " + JSON.stringify({ revision, capturedAt: new Date().toISOString() }) + "\\n\\n"
+      "id: " + revision + "\n" +
+      "event: snapshot\n" +
+      "data: " + JSON.stringify({ revision, capturedAt: new Date().toISOString() }) + "\n\n"
     );
     this.eventClients.set(response, sessionId);
     response.on("close", () => this.removeEventStream(response));
@@ -614,7 +614,7 @@ export class ControlCenterServer {
       revision = this.store.getOperationalRevision();
     } catch {
       for (const response of this.eventClients.keys()) {
-        try { response.write("event: unavailable\\ndata: {}\\n\\n"); } catch { /* best effort */ }
+        try { response.write("event: unavailable\ndata: {}\n\n"); } catch { /* best effort */ }
       }
       return;
     }
@@ -622,9 +622,9 @@ export class ControlCenterServer {
     const now = Date.now();
     if (revision !== this.lastEventRevision) {
       this.lastEventRevision = revision;
-      const payload = "id: " + revision + "\\n" +
-        "event: refresh\\n" +
-        "data: " + JSON.stringify({ revision, changedAt: new Date(now).toISOString() }) + "\\n\\n";
+      const payload = "id: " + revision + "\n" +
+        "event: refresh\n" +
+        "data: " + JSON.stringify({ revision, changedAt: new Date(now).toISOString() }) + "\n\n";
       for (const response of this.eventClients.keys()) {
         if (response.destroyed || response.writableEnded) {
           this.removeEventStream(response);
@@ -639,7 +639,7 @@ export class ControlCenterServer {
           this.removeEventStream(response);
           continue;
         }
-        try { response.write(": keep-alive\\n\\n"); } catch { this.removeEventStream(response); }
+        try { response.write(": keep-alive\n\n"); } catch { this.removeEventStream(response); }
       }
       this.lastHeartbeatAt = now;
     }
