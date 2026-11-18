@@ -673,6 +673,12 @@ export class SqliteStore {
     return rows.map((r) => this.mapExecution(r));
   }
 
+  countExecutionsByStatus(status: ExecutionRecord["status"]): number {
+    const db = this.requireDb();
+    const row = readOne(db, `SELECT COUNT(*) AS count FROM executions WHERE status = ?`, [status]);
+    return Number(row?.count ?? 0);
+  }
+
   private mapExecution(row: Row): ExecutionRecord {
     return {
       id: String(row.id),
