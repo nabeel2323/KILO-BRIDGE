@@ -8,6 +8,8 @@ import { Logger } from "./components/logging";
 import { ProjectRegistry } from "./components/registry";
 import { GitHubProvider } from "./components/github";
 import { Worker } from "./components/worker";
+import { GitHubIntakeService } from "./components/githubIntake";
+import { SandboxGitHubIntakeDispatcher } from "./components/sandboxGitHubIntakeDispatcher";
 import { VerificationEngine } from "./components/verification";
 import { ReportGenerator } from "./components/report";
 import type { ReportData } from "./components/report";
@@ -62,6 +64,8 @@ export interface AppContext {
 export class KiloBridgeApp {
   private ctx!: AppContext;
   private initialized = false;
+  private githubIntakeService: GitHubIntakeService | null = null;
+  private githubIntakeConfigFingerprint: string | null = null;
 
   get store(): SqliteStore { return this.ctx.store; }
   get registry(): ProjectRegistry { return this.ctx.registry; }
@@ -840,6 +844,101 @@ export class KiloBridgeApp {
       outstandingIssues: [],
       status,
     };
+  }
+
+  private getGitHubIntakeService(config: BridgeConfig): GitHubIntakeService {
+    const fingerprint = JSON.stringify({
+      githubIntakeEnabled: config.githubIntakeEnabled,
+      githubIntakeAllowedRepositories: config.githubIntakeAllowedRepositories,
+      ghEnabled: config.ghEnabled,
+      kiloEnabled: config.kiloEnabled,
+      workerEnabled: config.workerEnabled,
+      defaultTaskTimeoutMs: config.defaultTaskTimeoutMs,
+    });
+    if (this.githubIntakeService && this.githubIntakeConfigFingerprint !== fingerprint) {
+      this.githubIntakeService.stop();
+      this.githubIntakeService = null;
+    }
+    if (!this.githubIntakeService) {
+      const dispatcher = new SandboxGitHubIntakeDispatcher({
+        bridgeRoot: this.ctx.bridgeRoot,
+        store: this.ctx.store,
+        registry: this.ctx.registry,
+        logger: this.ctx.logger,
+      });
+      this.githubIntakeService = new GitHubIntakeService({
+        bridgeRoot: this.ctx.bridgeRoot,
+        config: {
+          githubIntakeEnabled: config.githubIntakeEnabled,
+          githubIntakeAllowedRepositories: config.githubIntakeAllowedRepositories,
+          ghEnabled: config.ghEnabled,
+          kiloEnabled: config.kiloEnabled,
+          workerEnabled: config.workerEnabled,
+          defaultTaskTimeoutMs: config.defaultTaskTimeoutMs,
+        },
+        store: this.ctx.store,
+        registry: this.ctx.registry,
+        dispatcher,
+        workerId: `github-intake:${process.pid}`,
+      });
+      this.githubIntakeConfigFingerprint = fingerprint;
+    }
+    return this.githubIntakeService;
+  }
+
+  githubIntakeStatus(): {
+    enabled: boolean;
+    running: boolean;
+    dispatcherReady: boolean;
+    repositories: string[];
+    reason: string | null;
+  } {
+    const config = ensureBridgeConfig(this.ctx.bridgeRoot);
+    const service = this.getGitHubIntakeService(config);
+    const dispatcher = new SandboxGitHubIntakeDispatcher({
+      bridgeRoot: this.ctx.bridgeRoot,
+      store: this.ctx.store,
+      registry: this.ctx.registry,
+      logger: this.ctx.logger,
+    });
+    const dispatcherReady = dispatcher.isReady();
+    let reason: string | null = null;
+    if (!config.githubIntakeEnabled) reason = "githubIntakeEnabled is false";
+    else if (!config.sandboxExecutionEnabled) reason = "sandboxExecutionEnabled is false";
+    else if (!config.ghEnabled || !config.kiloEnabled) reason = "GitHub CLI and Kilo prerequisites must be enabled";
+    else if (config.githubIntakeAllowedRepositories.length === 0) reason = "No trusted repositories are configured";
+    else if (!dispatcherReady) reason = "Windows Sandbox, standalone Kilo, or upstream provider readiness check failed";
+    return {
+      enabled: service.getState().enabled,
+      running: service.getState().running,
+      dispatcherReady,
+      repositories: service.getState().repositories,
+      reason,
+    };
+  }
+
+  async githubIntakeStartContinuous(): Promise<BridgeResult<void>> {
+    let config: BridgeConfig;
+    try {
+      config = ensureBridgeConfig(this.ctx.bridgeRoot);
+    } catch {
+      return failResult("Bridge configuration could not be loaded", "BRIDGE_CONFIG_INVALID");
+    }
+    if (!config.githubIntakeEnabled) {
+      return failResult("dedicated GitHub intake is disabled in bridge.config.json", "GITHUB_INTAKE_DISABLED");
+    }
+    if (!config.sandboxExecutionEnabled) {
+      return failResult("Sandbox execution is disabled in bridge.config.json", "SANDBOX_EXECUTION_DISABLED");
+    }
+    const service = this.getGitHubIntakeService(config);
+    return service.startContinuous(config.pollIntervalMs);
+  }
+
+  githubIntakeStop(): BridgeResult<void> {
+    this.githubIntakeService?.stop();
+    this.githubIntakeService = null;
+    this.githubIntakeConfigFingerprint = null;
+    return okResult();
   }
 
   workerStartContinuous(projectId?: string): BridgeResult<{ pid: number; projectId?: string }> {
