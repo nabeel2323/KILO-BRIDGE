@@ -561,6 +561,22 @@ export class SqliteStore {
     return rows.map((r) => this.mapTask(r));
   }
 
+  /**
+   * Return a bounded, newest-first task page for local operational read models.
+   * The limit is capped here so API callers cannot request an unbounded export.
+   */
+  listTasks(limit = 100, offset = 0): TaskRecord[] {
+    const db = this.requireDb();
+    const safeLimit = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 200) : 100;
+    const safeOffset = Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+    const rows = readAll(
+      db,
+      `SELECT * FROM tasks ORDER BY updated_at DESC, created_at DESC LIMIT ? OFFSET ?`,
+      [safeLimit, safeOffset]
+    );
+    return rows.map((row) => this.mapTask(row));
+  }
+
   listReadyTasks(): TaskRecord[] {
     const db = this.requireDb();
     const rows = readAll(db, `SELECT * FROM tasks WHERE status = 'READY' ORDER BY created_at`);
