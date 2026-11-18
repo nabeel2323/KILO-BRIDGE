@@ -16,6 +16,15 @@ export const BridgeConfigSchema = z.object({
   ghEnabled: z.boolean().default(false),
   kiloEnabled: z.boolean().default(false),
   workerEnabled: z.boolean().default(false),
+  // Independent autonomous GitHub intake gate. Disabled on every fresh install.
+  githubIntakeEnabled: z.boolean().default(false),
+  // Explicit repository trust boundary. Empty means no repository can be ingested.
+  githubIntakeAllowedRepositories: z.array(
+    z.string().trim().regex(/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/, "repository must be owner/name")
+  ).default([]).refine(
+    (repositories) => new Set(repositories.map((repository) => repository.toLowerCase())).size === repositories.length,
+    "repository allowlist must not contain duplicates"
+  ),
   ghBin: z.string().optional(),
 });
 

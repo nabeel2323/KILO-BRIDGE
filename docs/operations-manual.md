@@ -8,12 +8,12 @@ Day-to-day operation of the Kilo Bridge worker on Windows.
 2. `node dist/cli.js init`
 3. `node dist/cli.js doctor` — resolve every `[FAIL]`.
 4. `gh auth login` — see [GitHub authentication](github-authentication.md).
-5. Register a project — `node dist/cli.js projects add examples/projects/scs-platform.json`.
-6. `node dist/cli.js github bootstrap scs-platform` — creates the ten `kilo:*` labels.
+5. Register only the intended project — `node dist/cli.js projects add <your-project-config.json>`.
+6. `node dist/cli.js github bootstrap <project-id>` — creates the ten `kilo:*` labels.
 7. Review the [security model](security-model.md).
 8. **Explicitly** enable the worker: `node dist/cli.js configure set workerEnabled true`.
 
-The worker never starts unattended processing merely because the app was installed. `workerEnabled` defaults to `false` and must be set deliberately.
+The worker never starts unattended processing merely because the app was installed. `workerEnabled` defaults to `false` and must be set deliberately. The separate `githubIntakeEnabled` gate also defaults to `false`; it is not the generic worker and must remain disabled until its dedicated intake service has passed its own release verification.
 
 ## Running the worker
 
@@ -69,7 +69,7 @@ Logs are JSON lines under `logs/` (per level). Windows balloon notifications fir
 ## Re-running verification
 
 ```powershell
-node dist/cli.js verify --project scs-platform
+node dist/cli.js verify --project <project-id>
 ```
 
 Re-runs the configured suite against the latest `REPORT_READY` task's worktree and stores fresh verification records. Never trusts prior agent results.
@@ -86,7 +86,7 @@ The Bridge never merges, never pushes `main`/`develop`/release, and refuses if p
 
 ## Configuration reference
 
-`bridge.config.json` keys editable via `configure set`: `workerEnabled`, `pollIntervalMs`, `defaultTaskTimeoutMs`, `ghEnabled`, `kiloEnabled`. Unknown keys/values are rejected. See [Windows configuration](windows-configuration.md).
+`bridge.config.json` keys editable via `configure set`: `workerEnabled`, `githubIntakeEnabled`, `githubIntakeAllowedRepositories` (JSON array of exact `owner/repo` strings), `pollIntervalMs`, `defaultTaskTimeoutMs`, `ghEnabled`, `kiloEnabled`. The intake gate defaults to false and the allowlist defaults to empty. The two switches are independent. See [Windows configuration](windows-configuration.md).
 
 ## Operational boundaries
 

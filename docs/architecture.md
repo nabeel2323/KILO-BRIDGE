@@ -9,7 +9,7 @@ Kilo Bridge is a configuration-driven, multi-project coordinator. Components are
 | Project Registry | `src/components/registry.ts` | Register/validate/enable/disable/inspect projects; structural validation; config templates |
 | GitHub Communication Provider | `src/components/github.ts` | Authenticated `gh api` transport: issues, comments, labels, draft PRs, rate limits |
 | Task Queue & Lifecycle Manager | `src/components/lifecycle.ts` | Atomic transitions, persistent leases, idempotency keys, correction attempts, lease recovery |
-| Local Worker | `src/components/worker.ts` | Polling loop, execution pipeline, corrections, publishing orchestration, singleton lock, graceful shutdown |
+| Local Worker | `src/components/worker.ts` | Legacy polling loop, execution pipeline, corrections, publishing orchestration, singleton lock, graceful shutdown |
 | Kilo CLI Adapter | `src/components/kilo.ts` | Preflight (detect/help/auth/model/agent), safe argv construction, event parsing, session capture, redaction |
 | Git Worktree Manager | `src/components/worktree.ts` | Origin verification, base SHA recording, isolated worktrees, change inventory, Bridge-owned commit/push |
 | Security & Permission Manager | `src/components/security.ts` | Deny-by-default `kilo.json` generation, denial verification, Bridge command policy, path guards, redaction |
@@ -35,7 +35,7 @@ Kilo Bridge is a configuration-driven, multi-project coordinator. Components are
 
 ## Persistence
 
-SQLite via `sql.js` (WASM). Every mutation is persisted to disk immediately (write-temp + rename) so leases and transitions survive crashes. Schema migrations are versioned via `PRAGMA user_version` (currently v3). Tables: `projects`, `tasks`, `task_transitions`, `executions`, `verifications`, `reports`, `security_policies`, `audit_log`, `meta`.
+SQLite via `sql.js` (WASM). Mutations are persisted to disk on writes. Schema migrations are versioned via `PRAGMA user_version` (currently v4). Tables: `projects`, `tasks`, `task_transitions`, `executions`, `verifications`, `reports`, `security_policies`, `audit_log`, `meta`.
 
 ## Transport abstraction
 
@@ -46,3 +46,13 @@ SQLite via `sql.js` (WASM). Every mutation is persisted to disk immediately (wri
 - No public HTTP server, tunnel, webhook listener, or remote execution endpoint.
 - No live streaming claims — polling is a persistent handoff mechanism.
 - No OS-level isolation claims — worktrees are filesystem isolation, not a sandbox. The worker should eventually run under a dedicated standard Windows account (see [security model](security-model.md)).
+
+## GitHub intake and Control Center roadmap status
+
+The configuration schema now defines two separate operational controls:
+
+- `workerEnabled`: existing generic worker gate; unchanged.
+- `githubIntakeEnabled`: dedicated autonomous intake gate; defaults to `false`.
+- `githubIntakeAllowedRepositories`: exact `owner/repo` allowlist; defaults to an empty array.
+
+The dedicated intake service and Control Center are still under implementation. Configuring either intake value does not start polling today. The service must remain disabled until its own implementation and runtime acceptance are complete. See the [implementation plan](github-control-center-implementation-plan.md) and [progress tracker](github-control-center-implementation-progress.md).

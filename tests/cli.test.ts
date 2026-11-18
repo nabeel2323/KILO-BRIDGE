@@ -38,6 +38,10 @@ test("cli: init creates db, dirs and config", async () => {
   assert.ok(fs.existsSync(path.join(root, "bridge.config.json")));
   assert.ok(fs.existsSync(path.join(root, "logs")));
   assert.ok(fs.existsSync(path.join(root, "reports")));
+  const config = JSON.parse(fs.readFileSync(path.join(root, "bridge.config.json"), "utf8"));
+  assert.equal(config.workerEnabled, false);
+  assert.equal(config.githubIntakeEnabled, false);
+  assert.deepEqual(config.githubIntakeAllowedRepositories, []);
   const projects = await runCli(root, ["projects", "list", "--json"]);
   assert.equal(projects.code, 0, projects.stderr);
   assert.deepEqual(JSON.parse(projects.stdout), [], "init must not register an implicit project");
@@ -116,6 +120,30 @@ test("cli: configure set workerEnabled persists and gates the worker", async () 
   // Invalid key rejected.
   const bad = await runCli(root, ["configure", "set", "notAKey", "1"]);
   assert.equal(bad.code, 1);
+  removeDir(root);
+});
+
+test("cli: GitHub intake gate and worker gate persist independently", async () => {
+  const root = makeTempDir("kilo-cli-");
+  await runCli(root, ["init"]);
+
+  const enableIntake = await runCli(root, ["configure", "set", "githubIntakeEnabled", "true"]);
+  assert.equal(enableIntake.code, 0, enableIntake.stderr);
+  let cfg = JSON.parse(fs.readFileSync(path.join(root, "bridge.config.json"), "utf8"));
+  assert.equal(cfg.githubIntakeEnabled, true);
+  assert.equal(cfg.workerEnabled, false, "intake configuration must not enable the generic worker");
+
+  const setAllowlist = await runCli(root, ["configure", "set", "githubIntakeAllowedRepositories", '["Owner/Repo"]']);
+  assert.equal(setAllowlist.code, 0, setAllowlist.stderr);
+  cfg = JSON.parse(fs.readFileSync(path.join(root, "bridge.config.json"), "utf8"));
+  assert.deepEqual(cfg.githubIntakeAllowedRepositories, ["Owner/Repo"]);
+  assert.equal(cfg.workerEnabled, false);
+
+  const invalidRepo = await runCli(root, ["configure", "set", "githubIntakeAllowedRepositories", '["not-a-repository"]']);
+  assert.equal(invalidRepo.code, 1, "malformed repository allowlist entries must be rejected");
+
+  const invalidBool = await runCli(root, ["configure", "set", "githubIntakeEnabled", "yes"]);
+  assert.equal(invalidBool.code, 1, "boolean configuration must reject ambiguous values");
   removeDir(root);
 });
 

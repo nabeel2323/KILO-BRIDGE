@@ -24,7 +24,9 @@ node dist/cli.js init
   "defaultTaskTimeoutMs": 21600000,
   "ghEnabled": false,
   "kiloEnabled": false,
-  "workerEnabled": false
+  "workerEnabled": false,
+  "githubIntakeEnabled": false,
+  "githubIntakeAllowedRepositories": []
 }
 ```
 
@@ -32,11 +34,13 @@ Edit safely with:
 
 ```powershell
 node dist/cli.js configure set workerEnabled true
+node dist/cli.js configure set githubIntakeEnabled false
+node dist/cli.js configure set githubIntakeAllowedRepositories '["owner/repository"]'
 node dist/cli.js configure set pollIntervalMs 60000
 node dist/cli.js configure set defaultTaskTimeoutMs 7200000
 ```
 
-Keys are validated; unknown keys and invalid values are rejected.
+Keys are validated; unknown keys and invalid values are rejected. The GitHub intake gate defaults to `false`, and its repository allowlist defaults to an empty array. An empty allowlist trusts no repository. The intake service is not activated merely by configuring the gate; keep it disabled until the dedicated service and its release verification are complete. The `workerEnabled` switch is independent.
 
 ## Environment variables
 

@@ -219,6 +219,29 @@ export class KiloBridgeApp {
       remediation: bridgeCfg.workerEnabled ? "None required." : "Worker is intentionally disabled - manual task execution only. No action required.",
     });
 
+    checks.push({
+      name: "githubIntakeEnabled",
+      status: bridgeCfg.githubIntakeEnabled ? "WARNING" : "PASS",
+      condition: bridgeCfg.githubIntakeEnabled ? "true" : "false",
+      explanation: bridgeCfg.githubIntakeEnabled
+        ? "The dedicated intake gate is set to enabled, but the intake service is not yet available in this implementation phase. No autonomous polling is started by this setting alone."
+        : "Dedicated GitHub intake is disabled. No autonomous Issue polling is permitted.",
+      remediation: bridgeCfg.githubIntakeEnabled
+        ? "Keep the gate disabled until the dedicated intake service and its runtime verification are complete."
+        : "None required. Enable only after repository trust configuration and the documented release gate are complete.",
+    });
+    checks.push({
+      name: "githubIntakeAllowedRepositories",
+      status: bridgeCfg.githubIntakeAllowedRepositories.length > 0 ? "PASS" : "WARNING",
+      condition: `${bridgeCfg.githubIntakeAllowedRepositories.length} allowlisted`,
+      explanation: bridgeCfg.githubIntakeAllowedRepositories.length > 0
+        ? "An explicit repository allowlist is configured for the future dedicated GitHub intake service."
+        : "The repository allowlist is empty; no GitHub repository is trusted for autonomous intake.",
+      remediation: bridgeCfg.githubIntakeAllowedRepositories.length > 0
+        ? "Review the list before enabling intake."
+        : "Add exact owner/repo entries only after reviewing the repository trust boundary.",
+    });
+
     const projects = this.ctx.registry.list();
     const activeProjects = projects.filter((p) => p.state === "active");
     checks.push({
