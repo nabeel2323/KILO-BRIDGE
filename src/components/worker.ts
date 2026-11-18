@@ -6,6 +6,8 @@ import crypto from "node:crypto";
 import { WorktreeManager } from "./worktree";
 import { SecurityManager } from "./security";
 import { KiloCliAdapter } from "./kilo";
+import type { KiloRunResult } from "./kilo";
+import type { SandboxTaskRunResult } from "./windowsSandboxTaskRunner";
 import { VerificationEngine } from "./verification";
 import { ReportGenerator } from "./report";
 import { GitHubProvider } from "./github";
@@ -18,6 +20,7 @@ import type {
   VerificationRecord,
   ReportStatus,
   WorkerModeConfig,
+  TaskStatus,
 } from "../types";
 import { ProjectRegistry } from "./registry";
 import { LifecycleManager, validateTaskAuthor } from "./lifecycle";
@@ -34,6 +37,23 @@ export interface WorkerOptions {
   githubFactory: (project: ProjectConfig) => GitHubProvider;
   kiloBin: string;
   workerId: string;
+  sandboxExecutionEnabled?: boolean;
+  sandboxRunner?: SandboxTaskExecutor;
+}
+
+export interface SandboxTaskExecutor {
+  readiness(): { ready: boolean; reasons: string[] };
+  run(
+    task: { id: string; title: string; body: string },
+    options: {
+      worktreePath: string;
+      worktreeRoot: string;
+      projectId: string;
+      agent?: string;
+      timeoutMs?: number;
+      executionId?: string;
+    }
+  ): Promise<SandboxTaskRunResult>;
 }
 
 export interface PollProjectResult {
@@ -81,6 +101,61 @@ export class Worker {
       insertTransition: (t) => opts.store.insertTransition(t),
       listTasksByStatuses: (statuses) => opts.store.listTasksByStatuses(statuses),
     });
+  }
+
+  /**
+   * Execute exactly one task that has already been claimed by the dedicated
+   * GitHub intake service. This method does not poll GitHub and never uses the
+   * generic worker's workerEnabled gate or host-Kilo fallback.
+   */
+  async dispatchClaimedSandboxTask(
+    taskId: string
+  ): Promise<BridgeResult<{ executionId: string; taskStatus: TaskStatus }>> {
+    if (this.opts.sandboxExecutionEnabled !== true) {
+      return failResult("Sandbox task execution is disabled", "SANDBOX_EXECUTION_DISABLED");
+    }
+    if (!this.opts.sandboxRunner) {
+      return failResult("No Windows Sandbox task runner is configured", "SANDBOX_RUNNER_UNAVAILABLE");
+    }
+    const readiness = this.opts.sandboxRunner.readiness();
+    if (!readiness.ready) {
+      return failResult(readiness.reasons.join("; "), "SANDBOX_NOT_READY");
+    }
+
+    const task = this.store.getTask(taskId);
+    if (!task) return failResult("task not found", "TASK_NOT_FOUND");
+    if (task.status !== "CLAIMED" || task.leaseHolder !== this.opts.workerId) {
+      return failResult("task is not claimed by this intake dispatch owner", "TASK_LEASE_MISMATCH");
+    }
+    if (!task.leaseExpiresAt || new Date(task.leaseExpiresAt).getTime() <= Date.now()) {
+      return failResult("task claim lease has expired", "TASK_LEASE_EXPIRED");
+    }
+    if (task.executionId) {
+      return failResult("task already has an execution identifier; reconciliation is required", "TASK_ALREADY_EXECUTED");
+    }
+
+    const project = this.registry.get(task.projectId);
+    if (!project || project.state !== "active" || project.config.state !== "active") {
+      return failResult("task project is missing or disabled", "PROJECT_DISABLED");
+    }
+
+    const github = this.opts.githubFactory(project.config);
+    try {
+      await this.executeTask(project.config, github, task, true);
+    } catch (error) {
+      return failResult(
+        "Sandbox dispatch failed before a durable execution result could be confirmed: " +
+          (error instanceof Error ? error.message : String(error)),
+        "SANDBOX_DISPATCH_FAILED"
+      );
+    }
+
+    const completedTask = this.store.getTask(taskId);
+    const executionId = completedTask?.executionId;
+    if (!executionId || !this.store.listExecutions(taskId).some((execution) => execution.id === executionId)) {
+      return failResult("Sandbox dispatch ended without a durable execution record", "SANDBOX_EXECUTION_EVIDENCE_MISSING");
+    }
+    return okResult({ executionId, taskStatus: completedTask!.status });
   }
 
   getState(): WorkerState {
@@ -343,7 +418,7 @@ export class Worker {
     return { corrections, errors };
   }
 
-  private async executeTask(config: ProjectConfig, gh: GitHubProvider, task: TaskRecord): Promise<boolean> {
+  private async executeTask(config: ProjectConfig, gh: GitHubProvider, task: TaskRecord, sandboxOnly = false): Promise<boolean> {
     const claim = this.lifecycle.claimTask(task.id, this.opts.workerId, 10 * 60 * 1000);
     if (!claim.ok) {
       // Correction path: task may already be CLAIMED/RUNNING with a valid/expired lease.
@@ -423,23 +498,82 @@ export class Worker {
       return false;
     }
 
-    const adapter = new KiloCliAdapter({
-      kiloBin: this.opts.kiloBin,
-      worktreePath: prepDir,
-      taskTitle: `GitHub Issue #${task.issueNumber}`,
-      taskSpec: task.body,
-      timeoutMs: config.taskTimeoutMs ?? this.opts.config.defaultTaskTimeoutMs,
-      auto: true,
-      model: config.kiloModel,
-      agent: config.kiloAgent,
-    });
-    const preflight = await adapter.preflight();
-    if (!preflight.ok) {
-      await this.failTask(withPrep, gh, `kilo preflight failed: ${preflight.error}`);
-      return false;
-    }
-    const run = await adapter.run();
     const executionId = crypto.randomUUID();
+    let run: KiloRunResult;
+    if (sandboxOnly) {
+      const sandboxRunner = this.opts.sandboxRunner;
+      if (this.opts.sandboxExecutionEnabled !== true || !sandboxRunner) {
+        await this.failTask(withPrep, gh, "Sandbox execution is not configured; host execution fallback is prohibited");
+        return false;
+      }
+      const readiness = sandboxRunner.readiness();
+      if (!readiness.ready) {
+        await this.failTask(withPrep, gh, "Windows Sandbox is not ready: " + readiness.reasons.join("; "));
+        return false;
+      }
+      const sandboxResult = await sandboxRunner.run(
+        { id: task.id, title: task.title, body: task.body },
+        {
+          worktreePath: prepDir,
+          worktreeRoot: config.worktreeRoot,
+          projectId: config.id,
+          agent: config.kiloAgent,
+          timeoutMs: config.taskTimeoutMs ?? this.opts.config.defaultTaskTimeoutMs,
+          executionId,
+        }
+      );
+      if (sandboxResult.executionId !== executionId) {
+        await this.failTask(withPrep, gh, "Windows Sandbox returned a mismatched execution identifier");
+        return false;
+      }
+      const sandboxSucceeded =
+        sandboxResult.finalStatus === "COMPLETED" &&
+        sandboxResult.cleanup === "complete" &&
+        Boolean(sandboxResult.evidencePath);
+      const evidenceSummary = {
+        isolation: "windows-sandbox",
+        finalStatus: sandboxResult.finalStatus,
+        providerRequests: sandboxResult.providerRequests,
+        toolEvidence: sandboxResult.toolEvidence,
+        artifacts: sandboxResult.artifacts,
+        importedFiles: sandboxResult.importedFiles,
+        evidencePath: sandboxResult.evidencePath ?? null,
+        cleanup: sandboxResult.cleanup,
+      };
+      run = {
+        exitCode: sandboxSucceeded ? 0 : 1,
+        durationMs: sandboxResult.durationMs,
+        sessionId: executionId,
+        model: sandboxResult.model,
+        agent: sandboxResult.agent,
+        kiloVersion: sandboxResult.kiloVersion ?? undefined,
+        finalResponse: "Windows Sandbox execution " + sandboxResult.finalStatus +
+          ". Native tools observed: " + sandboxResult.toolEvidence.map((item) => item.name).join(", "),
+        events: [],
+        eventLogPath: sandboxResult.evidencePath ?? "",
+        stdout: JSON.stringify(evidenceSummary, null, 2),
+        stderr: sandboxResult.error ?? (sandboxResult.cleanup !== "complete" ? "Sandbox cleanup did not complete" : ""),
+        timedOut: sandboxResult.finalStatus === "TIMED_OUT",
+        error: sandboxResult.error ?? (sandboxResult.cleanup !== "complete" ? "Sandbox cleanup did not complete" : undefined),
+      };
+    } else {
+      const adapter = new KiloCliAdapter({
+        kiloBin: this.opts.kiloBin,
+        worktreePath: prepDir,
+        taskTitle: `GitHub Issue #${task.issueNumber}`,
+        taskSpec: task.body,
+        timeoutMs: config.taskTimeoutMs ?? this.opts.config.defaultTaskTimeoutMs,
+        auto: true,
+        model: config.kiloModel,
+        agent: config.kiloAgent,
+      });
+      const preflight = await adapter.preflight();
+      if (!preflight.ok) {
+        await this.failTask(withPrep, gh, `kilo preflight failed: ${preflight.error}`);
+        return false;
+      }
+      run = await adapter.run();
+    }
     this.store.upsertExecution({
       id: executionId,
       taskId: task.id,
