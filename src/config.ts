@@ -44,8 +44,9 @@ export function loadBridgeConfig(bridgeRoot: string): BridgeConfig {
   if (fs.existsSync(file)) {
     try {
       raw = JSON.parse(fs.readFileSync(file, "utf8"));
-    } catch {
-      raw = {};
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error("bridge.config.json contains invalid JSON; refusing to replace existing configuration: " + detail);
     }
   }
   return BridgeConfigSchema.parse(raw);
