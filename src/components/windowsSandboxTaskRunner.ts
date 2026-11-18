@@ -587,43 +587,175 @@ export class WindowsSandboxTaskRunner {
     } catch { return null; }
   }
 
-  private applyArtifacts(worktree: string, outbox: string, artifacts: GuestArtifact[]): { ok: boolean; data?: string[]; error?: string } {
-    const imported: string[] = [];
-    for (const artifact of artifacts) {
-      const relative = normalizeSandboxArtifactPath(artifact.path);
-      if (!relative) return { ok: false, error: "guest emitted an unsafe or prohibited path: " + artifact.path };
-      const target = path.resolve(worktree, ...relative.split("/"));
-      if (!within(worktree, target)) return { ok: false, error: "guest artifact escaped task worktree" };
-      let parent = worktree;
-      for (const part of relative.split("/").slice(0, -1)) {
-        parent = path.join(parent, part);
-        if (fs.existsSync(parent)) {
-          const stat = fs.lstatSync(parent);
-          if (!stat.isDirectory() || stat.isSymbolicLink()) return { ok: false, error: "artifact parent path is not a safe directory" };
-        } else fs.mkdirSync(parent);
-      }
-      if (artifact.action === "deleted") {
-        if (fs.existsSync(target)) {
-          const stat = fs.lstatSync(target);
-          if (!stat.isFile() || stat.isSymbolicLink()) return { ok: false, error: "refusing to delete non-regular worktree target" };
-          fs.unlinkSync(target);
+  private applyArtifacts(
+    worktree: string,
+    outbox: string,
+    artifacts: GuestArtifact[]
+  ): { ok: boolean; data?: string[]; error?: string } {
+    type Plan = {
+      relative: string;
+      target: string;
+      action: "added" | "modified" | "deleted";
+      existed: boolean;
+      backupPath?: string;
+      tempPath?: string;
+    };
+
+    if (!Array.isArray(artifacts)) return { ok: false, error: "guest artifact manifest is not an array" };
+    const seen = new Set<string>();
+    const plans: Plan[] = [];
+    const createdDirectories: string[] = [];
+    const backupRoot = path.join(path.dirname(outbox), "rollback-" + crypto.randomUUID());
+    let totalBytes = 0;
+
+    const ensureParents = (target: string): void => {
+      const relativeParent = path.relative(worktree, path.dirname(target));
+      if (relativeParent === "" || relativeParent === ".") return;
+      let current = worktree;
+      for (const part of relativeParent.split(path.sep)) {
+        if (!part || part === ".") continue;
+        current = path.join(current, part);
+        if (fs.existsSync(current)) {
+          const stat = fs.lstatSync(current);
+          if (!stat.isDirectory() || stat.isSymbolicLink()) {
+            throw new Error("artifact parent is not a safe directory");
+          }
+        } else {
+          fs.mkdirSync(current);
+          createdDirectories.push(current);
         }
-        imported.push(relative);
-        continue;
       }
-      const source = path.resolve(outbox, "changes", ...relative.split("/"));
-      if (!within(path.join(outbox, "changes"), source) || !fs.existsSync(source)) return { ok: false, error: "guest output artifact missing" };
-      const stat = fs.lstatSync(source);
-      if (!stat.isFile() || stat.isSymbolicLink()) return { ok: false, error: "guest output is not a regular file" };
-      const bytes = fs.readFileSync(source);
-      if (bytes.length !== artifact.size || digest(bytes) !== artifact.sha256) return { ok: false, error: "guest output hash or size mismatch: " + relative };
-      const temp = target + "." + crypto.randomUUID() + ".bridge-tmp";
+    };
+
+    const cleanupTemps = (): void => {
+      for (const plan of plans) {
+        if (plan.tempPath) {
+          try { if (fs.existsSync(plan.tempPath)) fs.unlinkSync(plan.tempPath); } catch { /* best effort */ }
+        }
+      }
+    };
+
+    const removeCreatedDirectories = (): void => {
+      for (const directory of [...createdDirectories].reverse()) {
+        try {
+          if (fs.existsSync(directory) && fs.readdirSync(directory).length === 0) fs.rmdirSync(directory);
+        } catch { /* preserve any non-empty or concurrently used directory */ }
+      }
+    };
+
+    try {
+      const changeRoot = path.join(outbox, "changes");
+      for (const artifact of artifacts) {
+        const relative = normalizeSandboxArtifactPath(artifact?.path ?? "");
+        if (!relative) throw new Error("guest emitted an unsafe or prohibited artifact path");
+        const key = relative.toLowerCase();
+        if (seen.has(key)) throw new Error("guest artifact manifest contains duplicate paths");
+        seen.add(key);
+
+        const target = path.resolve(worktree, ...relative.split("/"));
+        if (!within(worktree, target)) throw new Error("guest artifact escaped task worktree");
+        ensureParents(target);
+
+        const existed = fs.existsSync(target);
+        if (existed) {
+          const targetStat = fs.lstatSync(target);
+          if (!targetStat.isFile() || targetStat.isSymbolicLink()) {
+            throw new Error("refusing to replace a non-regular worktree target: " + relative);
+          }
+        }
+
+        const plan: Plan = {
+          relative,
+          target,
+          action: artifact.action,
+          existed,
+        };
+
+        if (artifact.action === "added" || artifact.action === "modified") {
+          const source = path.resolve(changeRoot, ...relative.split("/"));
+          if (!within(changeRoot, source) || !fs.existsSync(source)) {
+            throw new Error("guest output artifact is missing: " + relative);
+          }
+          const sourceStat = fs.lstatSync(source);
+          if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
+            throw new Error("guest output is not a regular file: " + relative);
+          }
+          if (!Number.isSafeInteger(artifact.size) || (artifact.size as number) < 0 ||
+              !artifact.sha256 || !/^[a-f0-9]{64}$/i.test(artifact.sha256)) {
+            throw new Error("guest output hash/size declaration is invalid: " + relative);
+          }
+          totalBytes += sourceStat.size;
+          if (sourceStat.size !== artifact.size || totalBytes > MAX_BYTES) {
+            throw new Error("guest output size limit or declared size mismatch: " + relative);
+          }
+          if (digest(fs.readFileSync(source)) !== artifact.sha256) {
+            throw new Error("guest output hash mismatch: " + relative);
+          }
+        } else if (artifact.action !== "deleted") {
+          throw new Error("guest artifact action is invalid: " + relative);
+        }
+
+        plans.push(plan);
+      }
+
+      // The whole manifest and every output is validated before any worktree
+      // file is changed. Save originals outside the guest-mapped outbox so the
+      // guest cannot tamper with rollback data.
+      fs.mkdirSync(backupRoot, { recursive: true });
+      for (const plan of plans) {
+        if (plan.existed) {
+          const backup = path.resolve(backupRoot, ...plan.relative.split("/"));
+          fs.mkdirSync(path.dirname(backup), { recursive: true });
+          fs.copyFileSync(plan.target, backup, fs.constants.COPYFILE_EXCL);
+          plan.backupPath = backup;
+        }
+        if (plan.action !== "deleted") {
+          const source = path.resolve(changeRoot, ...plan.relative.split("/"));
+          const bytes = fs.readFileSync(source);
+          const temp = plan.target + "." + crypto.randomUUID() + ".bridge-tmp";
+          fs.writeFileSync(temp, bytes, { flag: "wx", mode: 0o600 });
+          plan.tempPath = temp;
+        }
+      }
+
+      const applied: Plan[] = [];
       try {
-        fs.writeFileSync(temp, bytes, { flag: "wx", mode: 0o600 });
-        fs.renameSync(temp, target);
-      } finally { try { if (fs.existsSync(temp)) fs.unlinkSync(temp); } catch { /* best effort */ } }
-      imported.push(relative);
+        for (const plan of plans) {
+          if (plan.existed && fs.existsSync(plan.target)) fs.unlinkSync(plan.target);
+          if (plan.action !== "deleted") {
+            if (!plan.tempPath) throw new Error("staged artifact file is missing: " + plan.relative);
+            fs.renameSync(plan.tempPath, plan.target);
+            plan.tempPath = undefined;
+          }
+          applied.push(plan);
+        }
+      } catch (applyError) {
+        const rollbackErrors: string[] = [];
+        for (const plan of [...applied].reverse()) {
+          try {
+            if (fs.existsSync(plan.target)) fs.unlinkSync(plan.target);
+            if (plan.backupPath && fs.existsSync(plan.backupPath)) {
+              const restoreTemp = plan.target + "." + crypto.randomUUID() + ".bridge-restore";
+              fs.copyFileSync(plan.backupPath, restoreTemp, fs.constants.COPYFILE_EXCL);
+              fs.renameSync(restoreTemp, plan.target);
+            }
+          } catch {
+            rollbackErrors.push(plan.relative);
+          }
+        }
+        if (rollbackErrors.length) {
+          throw new Error("artifact import failed and rollback was incomplete for: " + rollbackErrors.join(", "));
+        }
+        throw applyError;
+      }
+
+      try { fs.rmSync(backupRoot, { recursive: true, force: true }); } catch { /* best effort cleanup */ }
+      return { ok: true, data: plans.map((plan) => plan.relative) };
+    } catch (error) {
+      cleanupTemps();
+      try { if (fs.existsSync(backupRoot)) fs.rmSync(backupRoot, { recursive: true, force: true }); } catch { /* best effort */ }
+      removeCreatedDirectories();
+      return { ok: false, error: sanitizeError(error) };
     }
-    return { ok: true, data: imported };
   }
 }
