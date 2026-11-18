@@ -150,8 +150,19 @@ button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);bac
   }
   async function renderProjects(){
     var d=await api("/api/projects");
-    var rows=d.projects.map(function(p){return '<tr><td><div class="row-title">'+esc(p.name)+'</div><small class="muted">'+esc(p.id)+'</small></td><td>'+esc(p.repository)+'</td><td>'+badge(p.state)+'</td><td>'+esc((p.allowedAuthors||[]).join(", "))+'</td></tr>';});
-    byId("content").innerHTML='<div class="section-head"><h2>Registered projects</h2><span class="muted">Project registry · no local paths exposed</span></div>'+renderTable(["Project","Repository","State","Allowed authors"],rows,"No projects are registered. Add a project using the existing CLI workflow.") ;
+    var rows=d.projects.map(function(p){
+      var next=p.state==="active"?"disabled":"active";
+      return '<tr><td><div class="row-title">'+esc(p.name)+'</div><small class="muted">'+esc(p.id)+'</small></td><td>'+esc(p.repository)+'</td><td>'+badge(p.state)+'</td><td>'+esc((p.allowedAuthors||[]).join(", "))+'</td><td><button class="project-state" data-project="'+esc(p.id)+'" data-state="'+next+'">'+(next==="active"?"Enable":"Disable")+'</button></td></tr>';
+    });
+    byId("content").innerHTML='<div class="section-head"><h2>Registered projects</h2><span class="muted">Project registry · no local paths exposed</span></div>'+renderTable(["Project","Repository","State","Allowed authors","Action"],rows,"No projects are registered. Add a project using the existing CLI workflow.");
+    document.querySelectorAll("button.project-state").forEach(function(button){
+      button.addEventListener("click",async function(){
+        try{
+          await api("/api/projects/"+encodeURIComponent(button.dataset.project)+"/state",{method:"POST",body:JSON.stringify({state:button.dataset.state})});
+          await renderProjects();
+        }catch(error){showError(error);}
+      });
+    });
   }
   async function renderGitHub(){
     var d=await api("/api/intake-claims");
@@ -194,7 +205,27 @@ button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);bac
   }
   async function renderSettings(){
     var d=await api("/api/settings");var g=d.gates;
-    byId("content").innerHTML='<div class="notice">Settings are currently displayed read-only. The UI will expose configuration writes after the audited settings API is implemented. This prevents enabling an intake service that does not yet have a production-isolated dispatcher.</div><div class="detail-grid"><div class="card"><h2>GitHub intake</h2><div class="kv"><span>Configuration</span>'+badge(g.githubIntakeEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Runtime available</span>'+badge(d.intakeRuntimeAvailable?"YES":"NO")+'</div><div class="kv"><span>Trusted repositories</span><span>'+esc(g.githubIntakeAllowedRepositories.join(", ")||"None")+'</span></div></div><div class="card"><h2>Generic worker</h2><div class="kv"><span>Configuration</span>'+badge(g.workerEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Runtime status</span>'+badge(d.workerRunning?"RUNNING":"NOT RUNNING")+'</div><p class="muted">The generic worker gate is independent from GitHub intake.</p></div></div>';
+    var repositories=(g.githubIntakeAllowedRepositories||[]).join("\n");
+    var html='<div class="notice">Repository trust and polling interval can be configured here. The automation gates are intentionally not switchable on from this page: the production-isolated task dispatcher and runtime acceptance are not complete. You can always turn either gate off.</div>';
+    html+='<div class="detail-grid">';
+    html+='<div class="card"><h2>GitHub intake</h2><div class="kv"><span>Configuration</span>'+badge(g.githubIntakeEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Runtime available</span>'+badge(d.intakeRuntimeAvailable?"YES":"NO")+'</div><div class="kv"><span>Runtime</span><span class="muted">'+esc(d.intakeRuntimeReason||"Not connected")+'</span></div><div class="field"><label for="trusted-repositories">Trusted repositories (one owner/repo per line)</label><textarea id="trusted-repositories" rows="5" style="width:100%;border:1px solid var(--line);background:#0a1324;color:var(--text);border-radius:9px;padding:11px">'+esc(repositories)+'</textarea></div><div class="field"><label for="poll-interval">Polling interval in milliseconds (1,000–3,600,000)</label><input id="poll-interval" type="number" min="1000" max="3600000" step="1000" value="'+esc(d.pollIntervalMs)+'"></div><button id="save-intake-settings" class="primary">Save repository and polling settings</button></div>';
+    html+='<div class="card"><h2>Generic worker</h2><div class="kv"><span>Configuration</span>'+badge(g.workerEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Runtime status</span>'+badge(d.workerRunning?"RUNNING":"NOT RUNNING")+'</div><p class="muted">The generic worker gate is independent from GitHub intake.</p><p class="muted">Enabling either autonomous gate is intentionally blocked until isolated dispatch is verified. Use the control below only to enforce the disabled state.</p><button id="disable-automation">Keep both automation gates disabled</button></div></div><div id="settings-message" class="footer"></div>';
+    byId("content").innerHTML=html;
+    byId("save-intake-settings").addEventListener("click",async function(){
+      try{
+        var repos=byId("trusted-repositories").value.split(/\r?\n/).map(function(x){return x.trim();}).filter(Boolean);
+        var interval=Number(byId("poll-interval").value);
+        await api("/api/settings",{method:"POST",body:JSON.stringify({githubIntakeAllowedRepositories:repos,pollIntervalMs:interval})});
+        byId("settings-message").textContent="Settings saved and audited.";
+        await renderSettings();
+      }catch(error){byId("settings-message").textContent=error.message||String(error);}
+    });
+    byId("disable-automation").addEventListener("click",async function(){
+      try{
+        await api("/api/settings",{method:"POST",body:JSON.stringify({githubIntakeEnabled:false,workerEnabled:false})});
+        await renderSettings();
+      }catch(error){byId("settings-message").textContent=error.message||String(error);}
+    });
   }
   document.querySelectorAll(".nav button").forEach(function(b){b.addEventListener("click",function(){navigate(b.dataset.page).catch(showError);});});
   byId("refresh").addEventListener("click",function(){navigate(currentPage).catch(showError);});
