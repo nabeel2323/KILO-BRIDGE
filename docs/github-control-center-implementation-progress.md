@@ -18,12 +18,12 @@
 | 1 | Configuration and durable data contracts | IN PROGRESS | 70% |
 | 2 | Dedicated GitHub intake service | PARTIAL | 35% |
 | 3 | Shared execution, evidence, and GitHub reconciliation | IN PROGRESS | 10% |
-| 4 | Control Center backend and security | NOT STARTED | 0% |
-| 5 | Control Center UI and live operations | NOT STARTED | 0% |
-| 6 | Integration, hardening, and independent verification | NOT STARTED | 0% |
+| 4 | Control Center backend and security | IN PROGRESS | 45% |
+| 5 | Control Center UI and live operations | PARTIAL | 30% |
+| 6 | Integration, hardening, and independent verification | PARTIAL | 10% |
 | 7 | Documentation and release readiness | NOT STARTED | 0% |
 
-**Overall completion:** approximately 23% (repository safety remediation, independent intake gate, schema-v5 durable claim records, fail-closed intake service, process locking, database snapshot-conflict protection, regression tests, and Windows CI setup are committed. No end-to-end intake dispatch or Control Center phase is complete; the newest database changes still need test execution evidence).
+**Overall completion:** approximately 30% (repository safety remediation, independent intake gate, schema-v5 durable claims, fail-closed intake source, SQL.js stale-snapshot protection, authenticated loopback Control Center server, database-backed read APIs, initial browser UI, CLI setup/start commands, operations documentation, and regression tests are committed. Database and Control Center tests are authored but the new commits do not yet have verified CI execution evidence. No end-to-end GitHub intake dispatch or generalized Sandbox task execution is complete).
 
 ## 2. Confirmed repository baseline
 
@@ -47,7 +47,7 @@
 | KB-IMPL-004 | CRITICAL | `SqliteStore` uses in-memory `sql.js` snapshots. A stale process could previously export over newer file state even with a unique claim index. | Serialize file replacement with an exclusive lock, compare the on-disk SHA-256 with the loaded snapshot, atomically replace via a same-directory temporary file, and invalidate stale instances on conflict. Add true child-process and restart tests before enabling intake. | CODE + REGRESSION TEST COMMITTED (`b3af31f`, `3be9bea`); WINDOWS CI / MULTI-PROCESS RUNTIME EVIDENCE PENDING |
 | KB-IMPL-007 | CRITICAL | `launchWindowsSandbox()` is a fixed fixture-based smoke harness, while `Worker.executeTask()` launches Kilo directly on the host. No production task execution is currently wired through a generalized Windows Sandbox runner. | Implement a per-execution Windows Sandbox task runner, secure provider connectivity, guest evidence validation, artifact/diff collection, and fail-closed behavior. Until then, production isolated auto-execution is NOT READY. | OPEN |
 | KB-IMPL-008 | HIGH | The hosted Windows CI runner does not have the user's configured native Kilo installation or a provisioned Windows Sandbox runtime. Five environment-dependent tests skip; green CI is not evidence of a real guest task. | Preserve skips as skips; run native Kilo and real Sandbox verification on the user's Windows machine after general task runner implementation, using only a disposable test repo. | OPEN |
-| KB-IMPL-005 | HIGH | No local Control Center server/UI was found in the inspected app/CLI baseline. | Add authenticated loopback server, API, and UI in isolated layers. | OPEN |
+| KB-IMPL-005 | HIGH | No local Control Center existed in the inspected baseline. | Add authenticated loopback server, read APIs, UI, audited settings APIs, and live updates. | LOOPBACK SERVER + READ APIs + INITIAL UI + CLI + TEST SOURCE COMMITTED; TEST EXECUTION / SETTINGS MUTATIONS / SSE OPEN |
 | KB-IMPL-006 | MEDIUM | GitHub source access does not execute arbitrary commands on the operator's Windows machine. | Use Windows CI for code regression and reserve actual native Kilo/Sandbox verification for the user's machine. | CI path established; host verification still open |
 
 ## 4. Phase 0 checklist — safety and baseline
@@ -80,6 +80,7 @@
 - [x] Add SQL.js file-level writer lock, SHA-256 snapshot compare, temp-file atomic replacement, and stale-store invalidation (commit `b3af31f`).
 - [x] Add stale-snapshot regression test authored (commit `3be9bea`); execution evidence is pending.
 - [x] Add a true child-process writer test using Node `-e`, with independent PID and database module (commit `0d57999`).
+- [x] Add a separate-PID child-process regression test for stale snapshot protection (commit `0d57999`).
 - [ ] Run full Windows CI for database persistence commits and capture the exact test/build result.
 
 ### Phase 2 — Dedicated GitHub intake
@@ -105,29 +106,33 @@
 
 ### Phase 4 — Control Center backend/security
 
-- [ ] Add explicit loopback-only HTTP server.
-- [ ] Add local authentication, secure password hashing, and session handling.
-- [ ] Add Host/Origin validation and CSRF protections.
-- [ ] Add per-route authorization, request limits, rate limits, CSP/security headers.
-- [ ] Add secret redaction for API, errors, logs, and audit details.
-- [ ] Add data APIs for health, projects, assignments, tasks, executions, events, evidence, and audit.
-- [ ] Add audited operator configuration APIs.
-- [ ] Test loopback-only listener and all security controls.
+- [x] Add explicit loopback-only HTTP server bound to `127.0.0.1` (commit `197cea3`).
+- [x] Add first-run one-time bootstrap token, scrypt password derivation, server-side sessions, and logout (commit `197cea3`).
+- [x] Add exact Host/Origin validation and per-session CSRF enforcement (commit `197cea3`).
+- [x] Add request-size limits, login throttling, CSP/security headers, safe errors, and non-loopback rejection (commits `197cea3`, `fdc1716`).
+- [x] Add data APIs for dashboard, projects, task pages/detail, executions, verifications, intake claims, settings view, and audit read model (commit `197cea3`; bounded task-page DB method `3a18cd4`).
+- [x] Omit local filesystem paths, claim tokens, raw audit detail, and secret-like error values from read models.
+- [ ] Add audited operator configuration mutation APIs and route-specific authorization policy.
+- [ ] Execute the Control Center security tests on Windows CI and verify cookie/browser behavior on the local Windows host.
 
 ### Phase 5 — Control Center UI/live operations
 
-- [ ] Implement dashboard.
-- [ ] Implement project mapping and trust settings.
-- [ ] Implement intake queue and task/execution detail.
-- [ ] Implement evidence/review center.
-- [ ] Implement activity/audit views.
-- [ ] Implement real-time updates with replay/reconnect safety.
-- [ ] Verify empty, failed, blocked, report-ready, and large-list states.
+- [x] Implement initial dashboard with actual persisted project/task/claim counts and independent gate state (commit `d20a938`).
+- [x] Implement project and trusted-author read view (filesystem paths omitted).
+- [x] Implement persisted GitHub intake claim queue.
+- [x] Implement task detail with body, lifecycle, execution, verification, and report summaries.
+- [x] Implement read-only review center and audit view.
+- [x] Implement read-only settings view that states intake runtime is unavailable and does not enable either gate.
+- [ ] Implement audited project/trust configuration changes and intake gate settings after dispatcher safeguards are in place.
+- [ ] Implement SSE or replay-safe polling/live updates; initial UI currently refreshes on demand.
+- [ ] Verify empty, failed, blocked, report-ready, large-list, and responsive states on a browser.
 
 ### Phase 6 — Integration and independent verification
 
-- [ ] Add deterministic unit and provider-fixture tests.
-- [ ] Add migration/restart/concurrency tests.
+- [x] Author Control Center tests for one-time token, password hashing, session issuance, loopback bind, authentication, Origin/CSRF, DB read models, path omission, and fail-closed settings mutation (`tests/control-center.test.ts`, commit `2502b05`).
+- [x] Author separate-process SQL.js stale-writer regression (`tests/db.test.ts`, commit `0d57999`).
+- [ ] Execute new Control Center/database tests and capture exact pass/fail/skip results.
+- [ ] Add migration/restart/concurrency tests beyond current test coverage.
 - [x] Add Windows CI workflow for typecheck/build/test (workflow run pending; no result claimed).
 - [ ] Add prompt-injection and workspace-boundary tests.
 - [ ] Test only against dedicated disposable GitHub repository or controlled fixtures.
@@ -140,7 +145,8 @@
 
 - [ ] Update architecture and developer guide.
 - [ ] Update installation, configuration, and authentication instructions.
-- [ ] Update operations, security, recovery, troubleshooting, and testing guides.
+- [x] Add Control Center first-run, security, usage, limitations, and troubleshooting guide (`docs/control-center-operations.md`, commit `8ca8f0f`); link from README (commit `80a6e5e`).
+- [ ] Update remaining operations, security, recovery, troubleshooting, and testing guides.
 - [ ] Update release notes and operator enablement/disablement procedure.
 - [ ] Record limitations, rollback, and recovery steps.
 - [ ] Complete final release-gate report with separate implementation/test/runtime evidence.
@@ -159,6 +165,7 @@
 | 2026-11-19 | 1/2 | Durable claims + fail-closed intake source | SOURCE COMMITTED | Schema-v5 claim table, repository-scoped unique key, intake poll lock, eligibility checks, claim-before-label ordering, reconciliation-required state, and gate-independence tests. Commits `d1f1ebc`, `34a958f`, `076e599`, `8d6c9eb`. |
 | 2026-11-19 | 1 | SQL.js stale-snapshot persistence guard | SOURCE + TEST COMMITTED; TEST EXECUTION PENDING | Commits `b3af31f` and `3be9bea`: exclusive persistence lock, SHA-256 compare-and-swap guard, same-directory temp file + rename, no close-time snapshot export, stale-instance refusal, and stale-writer regression test. Connected GitHub status endpoint returned no statuses for latest commit and exposed no push-triggered workflow run; no local Windows execution was performed. |
 | 2026-11-19 | 1 | Separate-process stale writer regression | TEST SOURCE COMMITTED; EXECUTION PENDING | Commit `0d57999` spawns a separate Node process against the same SQL.js file, writes through a distinct process snapshot, then verifies the parent stale writer is rejected and the child's committed value survives reopen. Windows CI result is not yet available through the connected status/run endpoints. |
+| 2026-11-19 | 4/5 | Local Control Center backend and initial UI | SOURCE + TESTS + DOCS COMMITTED; TEST EXECUTION PENDING | Server/read-model/CLI/UI commits: `197cea3`, `fdc1716`, `8772b65`, `d20a938`, `1f8377e`; tests `2502b05`; task paging `3a18cd4`; operator guide `8ca8f0f`; README link `80a6e5e`. Auth is one-time-token + scrypt + in-memory session; loopback/Host/Origin/CSRF/request limit/CSP protections are implemented in source. UI is read-only and explicitly reports intake runtime unavailable. No CI/test execution is claimed for these commits. |
 
 ### Runtime evidence inherited from earlier operator verification
 
@@ -176,17 +183,20 @@ The earlier project conversation reported that native Kilo integration scenarios
 
 ## 8. Current next implementation slice
 
-**Phase 1.3 — Execute and harden SQL.js writer-conflict verification, then implement the generalized Windows Sandbox task runner.**
+**Phase 3.1 — Implement the generalized Windows Sandbox task runner and a shared execution contract.**
 
-The latest database writer guard and stale-snapshot test are committed but are not marked complete until Windows CI or an equivalent test execution confirms them. Add a child-process race/restart test because two store instances in one test process do not fully prove OS-process behavior.
+The SQL.js writer guard and separate-process regression source are committed, but test execution evidence remains pending. Keep the intake gate false and do not wire a real dispatcher until this is verified.
 
-The next production-execution dependency is `WindowsSandboxTaskRunner`: current Sandbox code is a fixture smoke harness, and the intake dispatcher has no application wiring. Intake must continue to fail closed until task worktree staging, provider connectivity, guest result validation, artifact collection, and cleanup are implemented.
+The production-execution blocker remains `WindowsSandboxTaskRunner`: current `launchWindowsSandbox()` is a fixture smoke harness, while generic worker execution still launches Kilo on the host. The next slice must stage a real per-execution worktree and task spec, launch the native Kilo runtime in a disposable guest, provide narrowly scoped provider connectivity without copying long-lived credentials, validate a matching execution-ID result manifest and artifact hashes, import only safe workspace changes, and clean up fail-closed on any missing evidence.
+
+The Control Center backend/UI are a read-only foundation. The next web slice after execution wiring is audited settings mutation, SSE/replay, and browser-level verification.
 
 Required files likely include:
-- `src/db.ts`
-- `tests/db.test.ts`
-- `docs/database-concurrency.md`
-- next: `src/components/isolation.ts`, a new generalized Sandbox runner, and task-execution integration tests
+- `src/components/isolation.ts`
+- new `src/components/taskSandbox.ts` / shared execution service
+- `src/components/githubIntake.ts` and `src/app.ts` (only after a real dispatcher exists)
+- `tests/` runtime/isolation and Control Center suites
+- `docs/control-center-operations.md` and architecture/recovery docs
 
 Implementation constraints:
 - Remove the `registerScs` default behavior and hard-coded sample project creation.
