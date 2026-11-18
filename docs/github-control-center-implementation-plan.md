@@ -66,6 +66,7 @@ The following are source-level observations from branch `v1-implementation` at b
 | Generic worker | `src/components/worker.ts` combines discovery, claim labeling, correction handling, execution, verification, reports, and publishing. It checks `workerEnabled` in some execution paths, but GitHub discovery/label mutations occur in the same flow. | Do not simply reuse or start the generic worker for intake. Audit all legacy paths and extract a shared execution service behind separate entry-point gates. |
 | GitHub integration | `src/components/github.ts` is the existing GitHub provider abstraction and uses the local GitHub CLI integration. | Reuse the provider and safe process abstraction; do not introduce public webhooks or a second credential store. |
 | Web application | The inspected app/CLI structure does not yet show a Control Center server or UI. | Introduce a separated local web/API layer and keep startup independent from either task-processing service. |
+| Production isolation | `launchWindowsSandbox()` is a fixture-specific native smoke harness. `Worker.executeTask()` launches `KiloCliAdapter` directly on the host; production tasks are not routed through a generalized Windows Sandbox runner. | Build a generalized task guest runner that stages an actual task worktree and validated Kilo runtime, collects guest evidence and artifacts, and fails closed. Design secure provider access without copying provider secrets into the guest or silently enabling unrestricted networking. |
 | Tests | The project uses TypeScript and Node's built-in `node:test`; `tests/worker.test.ts` and `tests/db.test.ts` already cover core flows. | Add isolated tests for each intake state and regression tests for worker-gate independence. Never execute a production Issue in tests. |
 
 ## 4. Target architecture and component ownership
@@ -75,12 +76,13 @@ The following are source-level observations from branch `v1-implementation` at b
 | Component | Responsibility | Must not do |
 |---|---|---|
 | `GitHubIntakeService` | Poll explicitly allowlisted repositories; validate eligibility; coordinate durable claims; schedule accepted tasks automatically when enabled. | Start when its gate is false; alter generic-worker state; trust arbitrary Issue instructions. |
-| `TaskExecutionService` (extracted/shared) | Execute an already accepted task using the existing Kilo, verification, isolation, report, and lifecycle primitives. | Discover Issues or make intake trust decisions. |
+| `TaskExecutionService` (extracted/shared) | Execute an already accepted task using the secured worktree, a generalized Windows Sandbox guest runner, verification, report, and lifecycle primitives. | Discover Issues, make intake trust decisions, or fall back to host-side Kilo execution when required isolation is unavailable. |
 | `Worker` | Preserve legacy/manual generic-worker behavior under `workerEnabled`. | Be silently enabled or used as the GitHub intake scheduler. |
 | `GitHubProvider` | Read Issues/comments and perform narrowly scoped label/comment operations. | Hold application policy or accept raw task text as executable shell commands. |
 | `SqliteStore` | Persist project, task, claim, execution, event, and audit state with migration/version control. | Treat process-local memory as the concurrency authority. |
 | `ControlCenterServer` | Serve authenticated loopback HTTP routes and static UI; expose safe read models and authorized operator actions. | Bind to a non-loopback interface or return secrets. |
 | `ControlCenterUI` | Present dashboard, projects, assignments, tasks, executions, review, audit, and configuration. | Display fabricated execution or status evidence. |
+| `WindowsSandboxTaskRunner` | Stage one specific execution's worktree/spec/config/runtime into a disposable guest, launch native Kilo, validate execution-bound result protocol, and collect artifacts/diff safely. | Reuse fixed smoke fixtures for a real task, stage secrets into the guest, or return success without fresh guest evidence. |
 
 ### 4.2 Intake eligibility and trust contract
 
@@ -168,6 +170,11 @@ Exit criteria:
 **Purpose:** Reuse the verified native Kilo execution path while separating intake from execution scheduling.
 
 Tasks:
+- Build a generalized `WindowsSandboxTaskRunner`; the existing `launchWindowsSandbox()` is a fixed read-only fixture smoke harness and must not be treated as production task isolation.
+- Define the secure Kilo provider connectivity model for the guest. Do not copy long-lived provider credentials into guest folders or enable unrestricted networking as a shortcut; implement an authenticated, narrowly scoped provider relay or document a verified OS-enforced egress boundary.
+- Stage a per-execution immutable input bundle: project worktree snapshot, task text, execution identity, Kilo binary/runtime, strict Kilo policy, and required non-secret config.
+- Return only validated guest-produced changes/evidence; verify result protocol, matching execution ID, artifact hashes, diff path boundaries, guest exit code, and cleanup.
+- Keep host-side verification separate and execute only allowlisted Bridge-owned verification commands.
 - Extract or formalize a shared task execution service from the existing worker pipeline with no weakening of Kilo policy, verification, worktree handling, Windows Sandbox launch, guest-result validation, or cleanup.
 - Ensure the task is tied to a durable assignment and execution ID before launch.
 - Persist lifecycle events/stages and evidence as they occur.
