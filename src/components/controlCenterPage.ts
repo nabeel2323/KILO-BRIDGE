@@ -57,6 +57,9 @@ button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);bac
   var csrfToken = "";
   var currentPage = "dashboard";
   var cachedTasks = [];
+  var eventSource = null;
+  var eventSourceHasOpened = false;
+  var lastStreamRefreshAt = 0;
   var titles = {dashboard:"Overview",projects:"Projects",github:"GitHub intake",tasks:"Tasks & executions",review:"Review center",activity:"Activity & audit",settings:"Settings"};
   function byId(id){return document.getElementById(id);}
   function esc(value){return String(value === null || value === undefined ? "" : value).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c];});}
@@ -91,6 +94,29 @@ button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);bac
     var session=await api("/api/session");csrfToken=session.csrfToken||"";
     byId("auth-view").classList.add("hidden");byId("shell").classList.remove("hidden");
     await navigate("dashboard");
+    connectEvents();
+  }
+  function connectEvents(){
+    if(eventSource)eventSource.close();
+    eventSource=new EventSource("/api/events");
+    eventSource.onopen=function(){
+      if(eventSourceHasOpened){
+        navigate(currentPage).catch(showError);
+      }
+      eventSourceHasOpened=true;
+    };
+    eventSource.addEventListener("refresh",function(){
+      var now=Date.now();
+      if(now-lastStreamRefreshAt<1500)return;
+      lastStreamRefreshAt=now;
+      navigate(currentPage).catch(showError);
+    });
+    eventSource.addEventListener("unavailable",function(){
+      byId("page-title").textContent=(titles[currentPage]||"Overview")+" · reconnecting";
+    });
+    eventSource.onerror=function(){
+      byId("page-title").textContent=(titles[currentPage]||"Overview")+" · reconnecting";
+    };
   }
   async function start(){
     var state=await api("/api/auth/status");
@@ -229,7 +255,7 @@ button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);bac
   }
   document.querySelectorAll(".nav button").forEach(function(b){b.addEventListener("click",function(){navigate(b.dataset.page).catch(showError);});});
   byId("refresh").addEventListener("click",function(){navigate(currentPage).catch(showError);});
-  byId("logout").addEventListener("click",async function(){try{await api("/api/auth/logout",{method:"POST",body:"{}"});}catch(e){}csrfToken="";showAuth(false);});
+  byId("logout").addEventListener("click",async function(){if(eventSource){eventSource.close();eventSource=null;}try{await api("/api/auth/logout",{method:"POST",body:"{}"});}catch(e){}csrfToken="";eventSourceHasOpened=false;showAuth(false);});
   function showError(error){byId("content").innerHTML='<div class="notice">'+esc(error.message||error)+'</div>';}
   start().catch(function(error){showAuth(false);byId("auth-error").textContent=error.message||String(error);});
 })();
