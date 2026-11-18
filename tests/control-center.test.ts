@@ -201,3 +201,100 @@ test("control center: settings remain read-only and do not expose secrets or ena
     await env.cleanup();
   }
 });
+
+
+test("control center: trusted repositories and polling interval update atomically and are audited", async () => {
+  const env = await setupAuthenticatedServer();
+  try {
+    const origin = new URL(env.baseUrl).origin;
+    const response = await fetch(env.baseUrl + "api/settings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: origin,
+        Cookie: env.cookie,
+        "X-CSRF-Token": env.csrfToken,
+      },
+      body: JSON.stringify({
+        githubIntakeAllowedRepositories: ["test-owner/another-repo", "team.owner/project_2"],
+        pollIntervalMs: 60000,
+      }),
+    });
+    assert.equal(response.status, 200);
+    const data = await response.json() as any;
+    assert.deepEqual(data.gates.githubIntakeAllowedRepositories, ["test-owner/another-repo", "team.owner/project_2"]);
+    assert.equal(data.pollIntervalMs, 60000);
+    assert.equal(data.gates.workerEnabled, false);
+    assert.equal(data.gates.githubIntakeEnabled, false);
+
+    const persisted = JSON.parse(fs.readFileSync(path.join(env.root, "bridge.config.json"), "utf8"));
+    assert.deepEqual(persisted.githubIntakeAllowedRepositories, ["test-owner/another-repo", "team.owner/project_2"]);
+    assert.equal(persisted.pollIntervalMs, 60000);
+
+    const invalid = await fetch(env.baseUrl + "api/settings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: origin,
+        Cookie: env.cookie,
+        "X-CSRF-Token": env.csrfToken,
+      },
+      body: JSON.stringify({ githubIntakeAllowedRepositories: ["not-a-repository"] }),
+    });
+    assert.equal(invalid.status, 400);
+    const afterInvalid = JSON.parse(fs.readFileSync(path.join(env.root, "bridge.config.json"), "utf8"));
+    assert.deepEqual(afterInvalid.githubIntakeAllowedRepositories, ["test-owner/another-repo", "team.owner/project_2"]);
+    assert.equal(afterInvalid.pollIntervalMs, 60000);
+
+    const events = env.store.listAudit();
+    assert.ok(events.some((event) => event.action === "control_center.settings_changed"));
+    assert.ok(events.every((event) => !String(event.detail || "").includes("secret")));
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("control center: project state changes are audited and do not enable automation gates", async () => {
+  const env = await setupAuthenticatedServer();
+  try {
+    const origin = new URL(env.baseUrl).origin;
+    const headers = {
+      "Content-Type": "application/json",
+      Origin: origin,
+      Cookie: env.cookie,
+      "X-CSRF-Token": env.csrfToken,
+    };
+    const disable = await fetch(env.baseUrl + "api/projects/control-center-test/state", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ state: "disabled" }),
+    });
+    assert.equal(disable.status, 200);
+    const disabled = await disable.json() as any;
+    assert.equal(disabled.projects[0].state, "disabled");
+
+    const enable = await fetch(env.baseUrl + "api/projects/control-center-test/state", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ state: "active" }),
+    });
+    assert.equal(enable.status, 200);
+    const active = await enable.json() as any;
+    assert.equal(active.projects[0].state, "active");
+
+    const invalid = await fetch(env.baseUrl + "api/projects/control-center-test/state", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ state: "enabled" }),
+    });
+    assert.equal(invalid.status, 400);
+
+    const config = JSON.parse(fs.readFileSync(path.join(env.root, "bridge.config.json"), "utf8"));
+    assert.equal(config.workerEnabled, false);
+    assert.equal(config.githubIntakeEnabled, false);
+    const audit = env.store.listAudit();
+    assert.equal(audit.filter((event) => event.action === "control_center.project_state_changed").length, 2);
+  } finally {
+    await env.cleanup();
+  }
+});
