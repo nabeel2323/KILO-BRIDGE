@@ -1,7 +1,7 @@
 # GitHub Control Center and Intake — Implementation Progress
 
 **Tracker version:** 1.0  
-**Status:** IN PROGRESS — Phase 0 safety slices verified by Windows CI; Phase 1 configuration gate committed; durable claims and generalized task isolation remain open  
+**Status:** IN PROGRESS — Phase 0 safety hardening is CI-verified; Phase 1 config, schema-v5 claims, intake service, and SQL.js stale-snapshot protection are committed; integration and runtime proof remain open  
 **Repository:** `nabeel2323/KILO-BRIDGE`  
 **Branch:** `v1-implementation`  
 **Baseline commit reviewed:** `e3ecd61d5eb77befcb8169069019d9f44b7cf769`  
@@ -15,15 +15,15 @@
 | Phase | Description | Status | Completion |
 |---|---|---|---:|
 | 0 | Repository boundary, baseline, and safety remediation | PARTIAL | 85% |
-| 1 | Configuration and durable data contracts | IN PROGRESS | 40% |
-| 2 | Dedicated GitHub intake service | NOT STARTED | 0% |
+| 1 | Configuration and durable data contracts | IN PROGRESS | 70% |
+| 2 | Dedicated GitHub intake service | PARTIAL | 35% |
 | 3 | Shared execution, evidence, and GitHub reconciliation | IN PROGRESS | 10% |
 | 4 | Control Center backend and security | NOT STARTED | 0% |
 | 5 | Control Center UI and live operations | NOT STARTED | 0% |
 | 6 | Integration, hardening, and independent verification | NOT STARTED | 0% |
 | 7 | Documentation and release readiness | NOT STARTED | 0% |
 
-**Overall completion:** 18% (roadmap/tracker, SCS-bootstrap removal, independent intake gate, Windows CI, and generic-worker disabled-state hardening are committed; CI is green. No end-to-end intake or Control Center phase is complete).
+**Overall completion:** approximately 23% (repository safety remediation, independent intake gate, schema-v5 durable claim records, fail-closed intake service, process locking, database snapshot-conflict protection, regression tests, and Windows CI setup are committed. No end-to-end intake dispatch or Control Center phase is complete; the newest database changes still need test execution evidence).
 
 ## 2. Confirmed repository baseline
 
@@ -31,8 +31,8 @@
 - [x] Confirmed implementation branch: `v1-implementation`.
 - [x] Recorded branch baseline commit: `e3ecd61d5eb77befcb8169069019d9f44b7cf769`.
 - [x] Inspected `AGENTS.md`, `package.json`, `src/config.ts`, `src/app.ts`, `src/db.ts`, `src/types.ts`, `src/cli.ts`, `src/components/worker.ts`, `src/components/github.ts`, and `src/components/lifecycle.ts`.
-- [x] Confirmed the database currently uses `PRAGMA user_version = 4` and `sql.js`.
-- [x] Confirmed `githubIntakeEnabled` does not yet exist in the inspected configuration schema.
+- [x] Confirmed the database uses `sql.js`; schema migration v5 now adds durable repository/Issue/assignment-generation claims.
+- [x] Confirmed `githubIntakeEnabled` and an explicit empty-by-default repository allowlist are now in the configuration schema.
 - [x] Confirmed the existing worker combines GitHub discovery/label changes with correction and execution workflows.
 - [x] Confirmed the repository already has Node `node:test` suites for worker/database behavior.
 - [x] Created the phased implementation plan and this tracker.
@@ -42,9 +42,9 @@
 | ID | Severity | Finding | Required action | Status |
 |---|---|---|---|---|
 | KB-IMPL-001 | CRITICAL | `KiloBridgeApp.init()` previously defaulted `registerScs=true`; CLI initialization enabled registration for the default Bridge root and contained a hard-coded `scs-platform` mapping. SCS-specific example and operational references also existed in Kilo Bridge. | Remove implicit project registration; make init neutral; preserve existing project records; never open the SCS path. | SOURCE + REGRESSION TESTS VERIFIED IN CI |
-| KB-IMPL-002 | HIGH | Dedicated intake gate and repository trust allowlist were absent from the configuration schema. | Add false-by-default gate, empty-by-default allowlist, and independent tests. | SOURCE + TESTS VERIFIED IN CI; DB CLAIM CONTRACT OPEN |
+| KB-IMPL-002 | HIGH | Dedicated intake gate and repository trust allowlist were absent from the configuration schema. | Add false-by-default gate, empty-by-default allowlist, and independent tests. | CONFIG SOURCE + GATE REGRESSION VERIFIED IN CI; INTAKE END-TO-END OPEN |
 | KB-IMPL-003 | HIGH | Existing `Worker` combines polling, claim labels, correction processing, and execution. | Extract shared execution from discovery; do not use Worker as the new intake service. | OPEN — execution pipeline extraction still required |
-| KB-IMPL-004 | CRITICAL | `SqliteStore` uses an in-memory `sql.js` database and rewrites the database file on every persist. Separate processes can hold stale in-memory snapshots; a normal SQL UNIQUE constraint alone will not prevent last-writer data loss. | Establish a real single-writer architecture or move claim persistence to a transactional storage implementation; prove process-level exclusion and restart/concurrency behavior before enabling intake. | OPEN |
+| KB-IMPL-004 | CRITICAL | `SqliteStore` uses in-memory `sql.js` snapshots. A stale process could previously export over newer file state even with a unique claim index. | Serialize file replacement with an exclusive lock, compare the on-disk SHA-256 with the loaded snapshot, atomically replace via a same-directory temporary file, and invalidate stale instances on conflict. Add true child-process and restart tests before enabling intake. | CODE + REGRESSION TEST COMMITTED (`b3af31f`, `3be9bea`); WINDOWS CI / MULTI-PROCESS RUNTIME EVIDENCE PENDING |
 | KB-IMPL-007 | CRITICAL | `launchWindowsSandbox()` is a fixed fixture-based smoke harness, while `Worker.executeTask()` launches Kilo directly on the host. No production task execution is currently wired through a generalized Windows Sandbox runner. | Implement a per-execution Windows Sandbox task runner, secure provider connectivity, guest evidence validation, artifact/diff collection, and fail-closed behavior. Until then, production isolated auto-execution is NOT READY. | OPEN |
 | KB-IMPL-008 | HIGH | The hosted Windows CI runner does not have the user's configured native Kilo installation or a provisioned Windows Sandbox runtime. Five environment-dependent tests skip; green CI is not evidence of a real guest task. | Preserve skips as skips; run native Kilo and real Sandbox verification on the user's Windows machine after general task runner implementation, using only a disposable test repo. | OPEN |
 | KB-IMPL-005 | HIGH | No local Control Center server/UI was found in the inspected app/CLI baseline. | Add authenticated loopback server, API, and UI in isolated layers. | OPEN |
@@ -74,21 +74,24 @@
 - [x] Add explicit `githubIntakeAllowedRepositories`, default empty, with owner/repo validation and duplicate rejection.
 - [x] Keep `workerEnabled` unchanged and separately exposed; CLI tests assert intake configuration does not enable the worker.
 - [x] Add CLI configuration support for the boolean gate and JSON-array repository allowlist.
-- [ ] Design and implement forward-only DB migration (current schema v4).
-- [ ] Implement durable assignment/claim identity and reconciliation state.
-- [ ] Add cross-process intake lock and unique-claim tests.
-- [ ] Execute fresh/legacy config tests and old database migration tests on Windows CI.
+- [x] Add forward-only DB migration v5 for durable repository + Issue + assignment-generation claim identity (commit `d1f1ebc`).
+- [x] Add durable claim state, owner/token, lease, task association, and reconciliation status persistence (commit `d1f1ebc`).
+- [x] Add intake poll lock, stale-owner reconciliation, unique-claim index, and unit coverage (commits `34a958f`, `d1f1ebc`, `076e599`).
+- [x] Add SQL.js file-level writer lock, SHA-256 snapshot compare, temp-file atomic replacement, and stale-store invalidation (commit `b3af31f`).
+- [x] Add stale-snapshot regression test authored (commit `3be9bea`); execution evidence is pending.
+- [ ] Run full Windows CI against the new persistence commits and add a real child-process writer race/restart test.
 
 ### Phase 2 — Dedicated GitHub intake
 
-- [ ] Add independent intake service and lifecycle/status APIs.
-- [ ] Poll only allowlisted repositories mapped to enabled projects.
-- [ ] Enforce Issue state, PR exclusion, ready label, author, and body validation.
-- [ ] Persist claim before provider mutation; reconcile partial failures.
-- [ ] Guarantee no side effects when disabled.
-- [ ] Add automatic dispatch after operator enablement; no per-task run action.
-- [ ] Prevent Bridge report comments from becoming task instructions.
-- [ ] Preserve correction workflow semantics.
+- [x] Add an independent `GitHubIntakeService` source implementation with a dedicated `githubIntakeEnabled` gate (commit `076e599`).
+- [x] Filter to explicit repository allowlist and exactly one active project mapping per repository.
+- [x] Enforce open Issue, PR exclusion, ready label, author allowlist, bounded title/body, canonical GitHub Issue URL, and fresh Issue re-fetch before claim.
+- [x] Persist claim before GitHub label mutation; move uncertain failures to `RECONCILIATION_REQUIRED`.
+- [x] Refuse automatic relaunch when a claim already exists or a dispatch outcome is uncertain.
+- [x] Add disabled-gate, execution-readiness, eligibility, and worker-gate-independence unit tests (commits `076e599`, `8d6c9eb`).
+- [ ] Wire the service into `KiloBridgeApp` / CLI lifecycle using a real production-isolated dispatcher; current dispatcher is an interface injected by a caller and no runtime wiring has been verified.
+- [ ] Reconcile terminal execution outcomes, report comments, correction requests, and report-marker filtering.
+- [ ] Verify automatic polling end-to-end on a disposable repository only after the generalized sandbox task runner is ready.
 
 ### Phase 3 — Shared execution and feedback
 
@@ -151,7 +154,9 @@
 | 2026-11-19 | 0 | Phase 0.1 source update | PARTIAL | Commit `d9fb2093c16d4ad74367f2900b62c032d2ca7d4f`: removed app-level SCS auto-registration and doctor check; removed CLI SCS defaults and updated CLI regression expectations. Runtime verification is pending CI. |
 | 2026-11-19 | 1 | Intake gate + allowlist configuration | VERIFIED IN CI | Commit `219caa499c0c40d893dd737f611f74a8754fb2e0`: added false-by-default gate, empty repo allowlist, Zod validation, CLI configuration, doctor diagnostics, tests, and docs; suite green in Actions run `44413204159`. |
 | 2026-11-19 | 0 | Worker disabled-state hardening | VERIFIED IN CI | Commit `c26b50ae42c1ccb63c8dcdec8148f70a5753378f`: direct polling now stops before any side effect and continuous start refuses disabled config; regression test passed in run `44413204159`. |
-| 2026-11-19 | 6 | Windows CI workflow | PASS | Workflow `.github/workflows/ci.yml`; run `44413204159` succeeded with 250 pass / 0 fail / 5 skipped. |
+| 2026-11-19 | 6 | Windows CI workflow | PASS | Workflow `.github/workflows/ci.yml`; run `44413204159` succeeded with 250 pass / 0 fail / 5 skipped on commit `c26b50a`. This predates the latest intake and database-concurrency commits. |
+| 2026-11-19 | 1/2 | Durable claims + fail-closed intake source | SOURCE COMMITTED | Schema-v5 claim table, repository-scoped unique key, intake poll lock, eligibility checks, claim-before-label ordering, reconciliation-required state, and gate-independence tests. Commits `d1f1ebc`, `34a958f`, `076e599`, `8d6c9eb`. |
+| 2026-11-19 | 1 | SQL.js stale-snapshot persistence guard | SOURCE + TEST COMMITTED; TEST EXECUTION PENDING | Commits `b3af31f` and `3be9bea`: exclusive persistence lock, SHA-256 compare-and-swap guard, same-directory temp file + rename, no close-time snapshot export, stale-instance refusal, and stale-writer regression test. Connected GitHub status endpoint returned no statuses for latest commit and exposed no push-triggered workflow run; no local Windows execution was performed. |
 
 ### Runtime evidence inherited from earlier operator verification
 
@@ -169,13 +174,17 @@ The earlier project conversation reported that native Kilo integration scenarios
 
 ## 8. Current next implementation slice
 
-**Phase 1.2 — Implement durable GitHub assignment claims (schema v5) after explicitly resolving SQL.js multi-writer behavior. In parallel, define the generalized Windows Sandbox task runner contract.**
+**Phase 1.3 — Execute and harden SQL.js writer-conflict verification, then implement the generalized Windows Sandbox task runner.**
+
+The latest database writer guard and stale-snapshot test are committed but are not marked complete until Windows CI or an equivalent test execution confirms them. Add a child-process race/restart test because two store instances in one test process do not fully prove OS-process behavior.
+
+The next production-execution dependency is `WindowsSandboxTaskRunner`: current Sandbox code is a fixture smoke harness, and the intake dispatcher has no application wiring. Intake must continue to fail closed until task worktree staging, provider connectivity, guest result validation, artifact collection, and cleanup are implemented.
 
 Required files likely include:
-- `src/app.ts`
-- `src/cli.ts`
-- `tests/cli.test.ts` and/or an initialization-focused test
-- relevant setup documentation
+- `src/db.ts`
+- `tests/db.test.ts`
+- `docs/database-concurrency.md`
+- next: `src/components/isolation.ts`, a new generalized Sandbox runner, and task-execution integration tests
 
 Implementation constraints:
 - Remove the `registerScs` default behavior and hard-coded sample project creation.
