@@ -190,6 +190,10 @@ export class ControlCenterServer {
   private server: Server | null = null;
   private readonly sessions = new Map<string, OperatorSession>();
   private readonly loginWindows = new Map<string, LoginWindow>();
+  private readonly eventClients = new Map<ServerResponse, string>();
+  private eventTimer: NodeJS.Timeout | null = null;
+  private lastEventRevision: string | null = null;
+  private lastHeartbeatAt = 0;
 
   constructor(options: ControlCenterOptions) {
     this.bridgeRoot = path.resolve(options.bridgeRoot);
@@ -247,6 +251,13 @@ export class ControlCenterServer {
 
   async close(): Promise<void> {
     this.sessions.clear();
+    if (this.eventTimer) clearInterval(this.eventTimer);
+    this.eventTimer = null;
+    this.lastEventRevision = null;
+    for (const response of this.eventClients.keys()) {
+      try { response.end(); } catch { /* best effort */ }
+    }
+    this.eventClients.clear();
     if (!this.server) return;
     const server = this.server;
     this.server = null;
@@ -443,9 +454,14 @@ export class ControlCenterServer {
     }
     if (route === "/api/auth/logout" && method === "POST") {
       this.sessions.delete(active.id);
+      this.closeEventStreamsForSession(active.id);
       this.clearSessionCookie(response);
       this.store.insertAudit({ actor: "local-operator", action: "control_center.logout" });
       this.sendJson(response, 200, { ok: true });
+      return;
+    }
+    if (route === "/api/events" && method === "GET") {
+      this.openEventStream(response, active.id);
       return;
     }
     if (route === "/api/dashboard" && method === "GET") {
@@ -525,6 +541,108 @@ export class ControlCenterServer {
       return;
     }
     this.sendJson(response, 404, { error: "Route not found." });
+  }
+
+  private openEventStream(response: ServerResponse, sessionId: string): void {
+    let revision: string;
+    try {
+      revision = this.store.getOperationalRevision();
+    } catch {
+      this.sendJson(response, 503, { error: "Operational event feed is temporarily unavailable." });
+      return;
+    }
+    const activeForSession = [...this.eventClients.values()].filter((id) => id === sessionId).length;
+    if (activeForSession >= 2) {
+      this.sendJson(response, 429, { error: "Too many open event streams for this session." });
+      return;
+    }
+
+    this.setSecurityHeaders(response);
+    response.statusCode = 200;
+    response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    response.setHeader("Cache-Control", "no-cache, no-transform");
+    response.setHeader("Connection", "keep-alive");
+    response.setHeader("X-Accel-Buffering", "no");
+    response.flushHeaders();
+    response.write("retry: 3000\\n\\n");
+    response.write(
+      "id: " + revision + "\\n" +
+      "event: snapshot\\n" +
+      "data: " + JSON.stringify({ revision, capturedAt: new Date().toISOString() }) + "\\n\\n"
+    );
+    this.eventClients.set(response, sessionId);
+    response.on("close", () => this.removeEventStream(response));
+
+    if (!this.eventTimer) {
+      this.lastEventRevision = revision;
+      this.lastHeartbeatAt = Date.now();
+      this.eventTimer = setInterval(() => this.broadcastOperationalChanges(), 2000);
+    }
+  }
+
+  private removeEventStream(response: ServerResponse): void {
+    this.eventClients.delete(response);
+    if (this.eventClients.size === 0 && this.eventTimer) {
+      clearInterval(this.eventTimer);
+      this.eventTimer = null;
+      this.lastEventRevision = null;
+    }
+  }
+
+  private closeEventStreamsForSession(sessionId: string): void {
+    for (const [response, owner] of this.eventClients) {
+      if (owner !== sessionId) continue;
+      this.eventClients.delete(response);
+      try { response.end(); } catch { /* best effort */ }
+    }
+    if (this.eventClients.size === 0 && this.eventTimer) {
+      clearInterval(this.eventTimer);
+      this.eventTimer = null;
+      this.lastEventRevision = null;
+    }
+  }
+
+  private broadcastOperationalChanges(): void {
+    if (this.eventClients.size === 0) {
+      if (this.eventTimer) clearInterval(this.eventTimer);
+      this.eventTimer = null;
+      this.lastEventRevision = null;
+      return;
+    }
+    let revision: string;
+    try {
+      revision = this.store.getOperationalRevision();
+    } catch {
+      for (const response of this.eventClients.keys()) {
+        try { response.write("event: unavailable\\ndata: {}\\n\\n"); } catch { /* best effort */ }
+      }
+      return;
+    }
+
+    const now = Date.now();
+    if (revision !== this.lastEventRevision) {
+      this.lastEventRevision = revision;
+      const payload = "id: " + revision + "\\n" +
+        "event: refresh\\n" +
+        "data: " + JSON.stringify({ revision, changedAt: new Date(now).toISOString() }) + "\\n\\n";
+      for (const response of this.eventClients.keys()) {
+        if (response.destroyed || response.writableEnded) {
+          this.removeEventStream(response);
+          continue;
+        }
+        try { response.write(payload); } catch { this.removeEventStream(response); }
+      }
+      this.lastHeartbeatAt = now;
+    } else if (now - this.lastHeartbeatAt >= 15000) {
+      for (const response of this.eventClients.keys()) {
+        if (response.destroyed || response.writableEnded) {
+          this.removeEventStream(response);
+          continue;
+        }
+        try { response.write(": keep-alive\\n\\n"); } catch { this.removeEventStream(response); }
+      }
+      this.lastHeartbeatAt = now;
+    }
   }
 
   private async handleSetup(
