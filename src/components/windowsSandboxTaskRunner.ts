@@ -180,13 +180,13 @@ function buildGuestProviderBridge(): string {
     ' const id=crypto.randomUUID(),requestFile=path.join(OUTBOX,"provider-request-"+id+".json"),responseFile=path.join(OUTBOX,"provider-response-"+id+".ndjson"),temp=requestFile+".tmp";',
     ' const envelope={protocolVersion:1,id,method:"POST",path:"/v1/chat/completions",bodyBase64:body.toString("base64")};',
     ' try{fs.writeFileSync(temp,JSON.stringify(envelope),{flag:"wx"});fs.renameSync(temp,requestFile);}catch{try{fs.unlinkSync(temp);}catch{}return json(res,503,{error:{message:"provider relay unavailable"}});}',
-    ' let offset=0,headersSent=false,complete=false;const started=Date.now();',
+    ' let offset=0,carry="",headersSent=false,complete=false;const started=Date.now();',
     ' const timer=setInterval(()=>{if(complete||res.destroyed){clearInterval(timer);return;}',
     ' if(Date.now()-started>TIMEOUT){complete=true;clearInterval(timer);if(!headersSent)json(res,504,{error:{message:"provider relay timed out"}});else res.end();try{fs.unlinkSync(requestFile);}catch{}try{fs.unlinkSync(responseFile);}catch{}return;}',
     ' if(!fs.existsSync(responseFile))return;let data;try{data=fs.readFileSync(responseFile);}catch{return;}',
     ' if(data.length<offset){complete=true;clearInterval(timer);if(!headersSent)json(res,502,{error:{message:"provider response reset"}});else res.end();return;}',
-    ' const fresh=data.subarray(offset);offset=data.length;',
-    ' for(const line of fresh.toString("utf8").split(/\\r?\\n/)){if(!line)continue;let record;try{record=JSON.parse(line);}catch{continue;}',
+    ' const fresh=data.subarray(offset);offset=data.length;const records=(carry+fresh.toString("utf8")).split(/\\r?\\n/);carry=records.pop()||"";',
+    ' for(const line of records){if(!line)continue;let record;try{record=JSON.parse(line);}catch{complete=true;clearInterval(timer);if(!headersSent)json(res,502,{error:{message:"provider relay record is invalid"}});else res.end();break;}',
     ' if(record.type==="headers"&&!headersSent){headersSent=true;res.writeHead(Number(record.statusCode||502),{"content-type":String(record.contentType||"application/json"),"cache-control":"no-cache, no-transform","x-content-type-options":"nosniff"});}',
     ' else if(record.type==="chunk"&&headersSent&&typeof record.data==="string"){try{res.write(Buffer.from(record.data,"base64"));}catch{}}',
     ' else if(record.type==="error"){if(!headersSent)json(res,502,{error:{message:String(record.message||"provider relay failed")}});else res.end();complete=true;clearInterval(timer);}',
@@ -210,7 +210,7 @@ function buildGuestBootstrap(): string {
     'function Stage([string]$Name,[bool]$Ok){$Stages.Add([pscustomobject]@{stage=$Name;ok=$Ok})}',
     'function HashFile([string]$File){return (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant()}',
     'function Snapshot([string]$Root){$map=@{};$excluded=@(".git",".kilo",".kilo-bridge","node_modules");foreach($file in Get-ChildItem -LiteralPath $Root -File -Force -Recurse){$rel=$file.FullName.Substring($Root.Length).TrimStart("\\","/").Replace("\\","/");$parts=$rel.Split("/");if($parts|Where-Object{$excluded -contains $_}){continue};if($rel -eq ".kilo-bridge-task.md"){continue};$map[$rel]=[pscustomobject]@{sha256=(HashFile $file.FullName);size=[int64]$file.Length}};return $map}',
-    'function QuoteArg([string]$Value){if($Value.Length -gt 0 -and $Value -notmatch \'[\\s"]\'){return $Value};$b=New-Object System.Text.StringBuilder;[void]$b.Append(\'"\');$n=0;foreach($c in $Value.ToCharArray()){if($c -eq \'\\\'){$n++;continue};if($c -eq \'"\'){[void]$b.Append((\'\\\'*($n*2+1)));[void]$b.Append(\'"\');$n=0;continue};if($n -gt 0){[void]$b.Append((\'\\\'*$n));$n=0};[void]$b.Append($c)};if($n -gt 0){[void]$b.Append((\'\\\'*($n*2))};[void]$b.Append(\'"\');return $b.ToString()}',
+    'function QuoteArg([string]$Value){if($Value.Length -gt 0 -and $Value -notmatch \'[\\s"]\'){return $Value};$b=New-Object System.Text.StringBuilder;[void]$b.Append(\'"\');$n=0;foreach($c in $Value.ToCharArray()){if($c -eq \'\\\'){$n++;continue};if($c -eq \'"\'){[void]$b.Append((\'\\\'*($n*2+1)));[void]$b.Append(\'"\');$n=0;continue};if($n -gt 0){[void]$b.Append((\'\\\'*$n));$n=0};[void]$b.Append($c)};if($n -gt 0){[void]$b.Append((\'\\\'*($n*2)))};[void]$b.Append(\'"\');return $b.ToString()}',
     'function ToolEvidence([string]$File){$items=New-Object System.Collections.Generic.List[object];if(-not(Test-Path -LiteralPath $File -PathType Leaf)){return $items};foreach($line in Get-Content -LiteralPath $File){if([string]::IsNullOrWhiteSpace($line)){continue};try{$event=$line|ConvertFrom-Json;$type=[string]$event.type;$part=$event.properties.part;$name="";if($part -and [string]$part.type -eq "tool"){if($part.tool -is [string]){$name=[string]$part.tool}elseif($part.name -is [string]){$name=[string]$part.name}};if(-not $name -and $type -match "tool"){foreach($v in @($event.tool,$event.name,$event.data.tool,$event.data.name)){if($v -is [string] -and $v.Length -gt 0){$name=$v;break}}};if($name){$items.Add([pscustomobject]@{name=$name;eventType=$type;timestamp=$(if($event.timestamp -is [string]){$event.timestamp}else{$null})})}}catch{}};return $items}',
     'try{',
     ' Stage "guest-bootstrap-started" $true',
@@ -412,11 +412,13 @@ export class WindowsSandboxTaskRunner {
     const provider = this.providerUrl();
     if (!provider.ok) reasons.push(provider.error);
     if (this.config.sandboxProviderApiKeyEnv && !process.env[this.config.sandboxProviderApiKeyEnv]) reasons.push("provider API-key environment variable missing from Bridge process");
-    const check = spawnSync("powershell.exe", [
-      "-NoProfile","-NonInteractive","-Command",
-      "$feature=Get-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -ErrorAction SilentlyContinue; $desktop=Get-Process explorer -ErrorAction SilentlyContinue; if($feature.State -eq 'Enabled' -and $desktop){exit 0}else{exit 1}",
-    ], { encoding: "utf8", windowsHide: true, timeout: 15_000 });
-    if (process.platform === "win32" && check.status !== 0) reasons.push("Windows Sandbox feature or interactive desktop session is unavailable");
+    if (process.platform === "win32") {
+      const check = spawnSync("powershell.exe", [
+        "-NoProfile","-NonInteractive","-Command",
+        "$feature=Get-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -ErrorAction SilentlyContinue; $desktop=Get-Process explorer -ErrorAction SilentlyContinue; if($feature.State -eq 'Enabled' -and $desktop){exit 0}else{exit 1}",
+      ], { encoding: "utf8", windowsHide: true, timeout: 15_000 });
+      if (check.status !== 0) reasons.push("Windows Sandbox feature or interactive desktop session is unavailable");
+    }
     return { ready: reasons.length === 0, reasons };
   }
 
@@ -511,6 +513,12 @@ export class WindowsSandboxTaskRunner {
       });
       await relay.stop();
       providerCount = relay.requestCount;
+      if (launched.timedOut) {
+        return finish("TIMED_OUT", { providerRequests: providerCount, error: "Windows Sandbox exceeded the configured execution timeout" });
+      }
+      if (launched.code !== 0) {
+        return finish("BOOT_FAILED", { providerRequests: providerCount, error: "Windows Sandbox launcher exited with code " + launched.code });
+      }
       const resultFile = path.join(outbox, "task-result-" + executionId + ".json");
       if (!fs.existsSync(resultFile)) {
         return finish(launched.timedOut ? "TIMED_OUT" : "BOOT_FAILED", {
