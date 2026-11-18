@@ -13,6 +13,8 @@ import type {
   SecurityPolicy,
   TaskStatus,
   ReportStatus,
+  GitHubIntakeClaim,
+  GitHubIntakeClaimStatus,
 } from "./types";
 import { okResult, failResult, type BridgeResult } from "./types";
 
@@ -116,12 +118,17 @@ export class SqliteStore {
     if (version < 2) this.migration2(db);
     if (version < 3) this.migration3(db);
     if (version < 4) this.migration4(db);
-    this.setUserVersion(db, 4);
+    if (version < 5) this.migration5(db);
+    this.setUserVersion(db, 5);
   }
 
   private getUserVersion(db: SqlJsDatabase): number {
     const res = db.exec("PRAGMA user_version");
     return Number(res[0]?.values?.[0]?.[0] ?? 0);
+  }
+
+  getSchemaVersion(): number {
+    return this.getUserVersion(this.requireDb());
   }
 
   private setUserVersion(db: SqlJsDatabase, v: number): void {
@@ -247,6 +254,31 @@ export class SqliteStore {
     try { db.exec("ALTER TABLE verifications ADD COLUMN name TEXT"); } catch { /* ignore */ }
   }
 
+  private migration5(db: SqlJsDatabase): void {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS github_intake_claims (
+        id TEXT PRIMARY KEY,
+        repository_full_name TEXT NOT NULL COLLATE NOCASE,
+        issue_number INTEGER NOT NULL CHECK (issue_number > 0),
+        assignment_generation INTEGER NOT NULL CHECK (assignment_generation > 0),
+        project_id TEXT NOT NULL,
+        task_id TEXT,
+        status TEXT NOT NULL,
+        claim_owner TEXT NOT NULL,
+        claim_token TEXT NOT NULL,
+        claimed_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        lease_expires_at TEXT,
+        last_error TEXT,
+        UNIQUE(repository_full_name, issue_number, assignment_generation)
+      );
+      CREATE INDEX IF NOT EXISTS idx_github_intake_claims_status
+        ON github_intake_claims(status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_github_intake_claims_task
+        ON github_intake_claims(task_id);
+    `);
+  }
+
   private runPersist(sql: string, params?: unknown[]): void {
     const db = this.requireDb();
     db.run(sql, params as any);
@@ -284,6 +316,104 @@ export class SqliteStore {
   setProjectState(id: string, state: string): void {
     const now = new Date().toISOString();
     this.runPersist(`UPDATE projects SET state = ?, updated_at = ? WHERE id = ?`, [state, now, id]);
+  }
+
+  // ---------- GitHub intake claims ----------
+  insertGitHubIntakeClaim(claim: GitHubIntakeClaim): boolean {
+    const db = this.requireDb();
+    const repository = claim.repositoryFullName.trim().toLowerCase();
+    if (!/^[a-z0-9._-]+\/[a-z0-9._-]+$/.test(repository)) {
+      throw new Error("invalid GitHub repository identity; expected owner/repo");
+    }
+    if (!Number.isSafeInteger(claim.issueNumber) || claim.issueNumber <= 0) {
+      throw new Error("invalid GitHub Issue number");
+    }
+    if (!Number.isSafeInteger(claim.assignmentGeneration) || claim.assignmentGeneration <= 0) {
+      throw new Error("invalid assignment generation");
+    }
+    db.run(
+      `INSERT OR IGNORE INTO github_intake_claims (
+        id, repository_full_name, issue_number, assignment_generation, project_id,
+        task_id, status, claim_owner, claim_token, claimed_at, updated_at,
+        lease_expires_at, last_error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        claim.id, repository, claim.issueNumber, claim.assignmentGeneration, claim.projectId,
+        claim.taskId ?? null, claim.status, claim.claimOwner, claim.claimToken,
+        claim.claimedAt, claim.updatedAt, claim.leaseExpiresAt ?? null, claim.lastError ?? null,
+      ]
+    );
+    const inserted = db.getRowsModified() === 1;
+    if (inserted) this.persist();
+    return inserted;
+  }
+
+  getGitHubIntakeClaim(repositoryFullName: string, issueNumber: number, assignmentGeneration = 1): GitHubIntakeClaim | null {
+    const db = this.requireDb();
+    const repository = repositoryFullName.trim().toLowerCase();
+    const row = readOne(db,
+      `SELECT * FROM github_intake_claims
+       WHERE repository_full_name = ? AND issue_number = ? AND assignment_generation = ?`,
+      [repository, issueNumber, assignmentGeneration]
+    );
+    return row ? this.mapGitHubIntakeClaim(row) : null;
+  }
+
+  getGitHubIntakeClaimById(id: string): GitHubIntakeClaim | null {
+    const db = this.requireDb();
+    const row = readOne(db, `SELECT * FROM github_intake_claims WHERE id = ?`, [id]);
+    return row ? this.mapGitHubIntakeClaim(row) : null;
+  }
+
+  listGitHubIntakeClaims(statuses?: GitHubIntakeClaimStatus[]): GitHubIntakeClaim[] {
+    const db = this.requireDb();
+    let rows: Row[];
+    if (statuses && statuses.length > 0) {
+      const placeholders = statuses.map(() => "?").join(",");
+      rows = readAll(db,
+        `SELECT * FROM github_intake_claims WHERE status IN (${placeholders}) ORDER BY updated_at DESC`,
+        statuses
+      );
+    } else {
+      rows = readAll(db, `SELECT * FROM github_intake_claims ORDER BY updated_at DESC`);
+    }
+    return rows.map((row) => this.mapGitHubIntakeClaim(row));
+  }
+
+  updateGitHubIntakeClaim(
+    id: string,
+    update: Partial<Pick<GitHubIntakeClaim, "taskId" | "status" | "updatedAt" | "leaseExpiresAt" | "lastError">>
+  ): boolean {
+    const db = this.requireDb();
+    const current = this.getGitHubIntakeClaimById(id);
+    if (!current) return false;
+    const next = { ...current, ...update, updatedAt: update.updatedAt ?? new Date().toISOString() };
+    db.run(
+      `UPDATE github_intake_claims SET task_id = ?, status = ?, updated_at = ?,
+        lease_expires_at = ?, last_error = ? WHERE id = ?`,
+      [next.taskId ?? null, next.status, next.updatedAt, next.leaseExpiresAt ?? null, next.lastError ?? null, id]
+    );
+    const modified = db.getRowsModified() === 1;
+    if (modified) this.persist();
+    return modified;
+  }
+
+  private mapGitHubIntakeClaim(row: Row): GitHubIntakeClaim {
+    return {
+      id: String(row.id),
+      repositoryFullName: String(row.repository_full_name),
+      issueNumber: Number(row.issue_number),
+      assignmentGeneration: Number(row.assignment_generation),
+      projectId: String(row.project_id),
+      taskId: row.task_id ? String(row.task_id) : undefined,
+      status: String(row.status) as GitHubIntakeClaimStatus,
+      claimOwner: String(row.claim_owner),
+      claimToken: String(row.claim_token),
+      claimedAt: String(row.claimed_at),
+      updatedAt: String(row.updated_at),
+      leaseExpiresAt: row.lease_expires_at ? String(row.lease_expires_at) : undefined,
+      lastError: row.last_error ? String(row.last_error) : undefined,
+    };
   }
 
   // ---------- tasks ----------

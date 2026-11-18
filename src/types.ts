@@ -215,6 +215,34 @@ export const ReportRecordSchema = z.object({
 
 export type ReportRecord = z.infer<typeof ReportRecordSchema>;
 
+export const GitHubIntakeClaimStatusSchema = z.enum([
+  "CLAIMED",
+  "TASK_CREATED",
+  "DISPATCHING",
+  "RUNNING",
+  "REPORT_READY",
+  "BLOCKED",
+  "FAILED",
+  "RECONCILIATION_REQUIRED",
+]);
+export type GitHubIntakeClaimStatus = z.infer<typeof GitHubIntakeClaimStatusSchema>;
+
+export interface GitHubIntakeClaim {
+  id: string;
+  repositoryFullName: string;
+  issueNumber: number;
+  assignmentGeneration: number;
+  projectId: string;
+  taskId?: string;
+  status: GitHubIntakeClaimStatus;
+  claimOwner: string;
+  claimToken: string;
+  claimedAt: string;
+  updatedAt: string;
+  leaseExpiresAt?: string;
+  lastError?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Security / policy
 // ---------------------------------------------------------------------------

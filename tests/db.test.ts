@@ -15,12 +15,14 @@ async function openStore(): Promise<{ store: SqliteStore; dir: string; dbPath: s
   return { store, dir, dbPath };
 }
 
-test("db: open creates file and migrations are idempotent on reopen", async () => {
+test("db: open creates file, applies schema v5, and migrations are idempotent on reopen", async () => {
   const { store, dir, dbPath } = await openStore();
   assert.ok(fs.existsSync(dbPath));
+  assert.equal(store.getSchemaVersion(), 5);
   store.close();
   const store2 = new SqliteStore(dbPath);
   await store2.open();
+  assert.equal(store2.getSchemaVersion(), 5);
   store2.close();
   removeDir(dir);
 });
@@ -56,6 +58,42 @@ test("db: task round-trip, idempotency and project+issue lookup", async () => {
   assert.equal(byIssue!.id, task.id);
   assert.equal(store.getTaskByProjectIssue(task.projectId, 999), null);
   store.close();
+  removeDir(dir);
+});
+
+test("db: GitHub intake claims are unique, durable, and updateable", async () => {
+  const { store, dir, dbPath } = await openStore();
+  const now = new Date().toISOString();
+  const claim = {
+    id: "claim-1",
+    repositoryFullName: "Owner/Repo",
+    issueNumber: 42,
+    assignmentGeneration: 1,
+    projectId: "test-project",
+    status: "CLAIMED" as const,
+    claimOwner: "intake-test",
+    claimToken: "opaque-test-token",
+    claimedAt: now,
+    updatedAt: now,
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+  };
+  assert.equal(store.insertGitHubIntakeClaim(claim), true);
+  assert.equal(store.insertGitHubIntakeClaim({ ...claim, id: "duplicate-claim", repositoryFullName: "owner/repo" }), false);
+  assert.equal(store.getGitHubIntakeClaim("OWNER/REPO", 42)?.id, "claim-1");
+  assert.equal(store.getGitHubIntakeClaimById("claim-1")?.projectId, "test-project");
+  assert.equal(store.listGitHubIntakeClaims(["CLAIMED"]).length, 1);
+  assert.equal(store.updateGitHubIntakeClaim("claim-1", { status: "TASK_CREATED", taskId: "task-42" }), true);
+  assert.equal(store.getGitHubIntakeClaimById("claim-1")?.taskId, "task-42");
+  assert.equal(store.updateGitHubIntakeClaim("missing", { status: "FAILED" }), false);
+
+  store.close();
+  const reopened = new SqliteStore(dbPath);
+  await reopened.open();
+  const recovered = reopened.getGitHubIntakeClaim("owner/repo", 42);
+  assert.ok(recovered);
+  assert.equal(recovered!.status, "TASK_CREATED");
+  assert.equal(recovered!.taskId, "task-42");
+  reopened.close();
   removeDir(dir);
 });
 
