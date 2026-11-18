@@ -83,9 +83,11 @@ interface GuestManifest {
   protocolVersion: number;
   executionId: string;
   finalStatus: string;
+  startedAt?: string;
+  completedAt?: string;
   kiloExitCode: number | null;
   kiloVersion: string | null;
-  stages: Array<{ stage: string; ok: boolean }>;
+  stages: Array<{ stage: string; ok: boolean; at?: string }>;
   toolEvidence: Array<{ name: string; eventType: string; timestamp?: string }>;
   artifacts: GuestArtifact[];
   error?: string | null;
