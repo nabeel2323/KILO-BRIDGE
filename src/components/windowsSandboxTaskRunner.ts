@@ -605,7 +605,7 @@ export class WindowsSandboxTaskRunner {
     const seen = new Set<string>();
     const plans: Plan[] = [];
     const createdDirectories: string[] = [];
-    const backupRoot = path.join(path.dirname(outbox), "rollback-" + crypto.randomUUID());
+    const backupRoot = path.join(this.root, "data", "sandbox-recovery", "rollback-" + crypto.randomUUID());
     let totalBytes = 0;
 
     const ensureParents = (target: string): void => {
@@ -664,6 +664,10 @@ export class WindowsSandboxTaskRunner {
           }
         }
 
+        if (artifact.action === "added" && existed) throw new Error("guest marked an existing file as added: " + relative);
+        if (artifact.action === "modified" && !existed) throw new Error("guest marked a missing file as modified: " + relative);
+        if (artifact.action === "deleted" && !existed) throw new Error("guest marked a missing file as deleted: " + relative);
+
         const plan: Plan = {
           relative,
           target,
@@ -721,13 +725,15 @@ export class WindowsSandboxTaskRunner {
       const applied: Plan[] = [];
       try {
         for (const plan of plans) {
+          // Register the plan before the first mutation so the current item is
+          // also rolled back if unlink/rename fails halfway through.
+          applied.push(plan);
           if (plan.existed && fs.existsSync(plan.target)) fs.unlinkSync(plan.target);
           if (plan.action !== "deleted") {
             if (!plan.tempPath) throw new Error("staged artifact file is missing: " + plan.relative);
             fs.renameSync(plan.tempPath, plan.target);
             plan.tempPath = undefined;
           }
-          applied.push(plan);
         }
       } catch (applyError) {
         const rollbackErrors: string[] = [];
@@ -744,7 +750,12 @@ export class WindowsSandboxTaskRunner {
           }
         }
         if (rollbackErrors.length) {
-          throw new Error("artifact import failed and rollback was incomplete for: " + rollbackErrors.join(", "));
+          const recoveryError = new Error(
+            "artifact import failed and rollback was incomplete for: " +
+            rollbackErrors.join(", ") + "; recovery files retained at " + backupRoot
+          );
+          Object.assign(recoveryError, { preserveRecovery: true });
+          throw recoveryError;
         }
         throw applyError;
       }
@@ -753,7 +764,10 @@ export class WindowsSandboxTaskRunner {
       return { ok: true, data: plans.map((plan) => plan.relative) };
     } catch (error) {
       cleanupTemps();
-      try { if (fs.existsSync(backupRoot)) fs.rmSync(backupRoot, { recursive: true, force: true }); } catch { /* best effort */ }
+      const preserveRecovery = Boolean((error as { preserveRecovery?: unknown })?.preserveRecovery);
+      if (!preserveRecovery) {
+        try { if (fs.existsSync(backupRoot)) fs.rmSync(backupRoot, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
       removeCreatedDirectories();
       return { ok: false, error: sanitizeError(error) };
     }
