@@ -2,7 +2,9 @@
 
 import path from "node:path";
 import fs from "node:fs";
+import crypto from "node:crypto";
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js";
+import { ExclusiveProcessLock } from "./components/processLock";
 import type {
   ProjectConfig,
   TaskRecord,
@@ -19,6 +21,19 @@ import type {
 import { okResult, failResult, type BridgeResult } from "./types";
 
 type Row = Record<string, unknown>;
+
+/**
+ * Raised when a sql.js snapshot is no longer based on the current database file.
+ * The caller must close and reopen the store before attempting another operation.
+ */
+export class DatabaseWriteConflictError extends Error {
+  readonly code = "DATABASE_WRITE_CONFLICT";
+
+  constructor(message = "database changed since this process loaded it; refusing to overwrite newer data") {
+    super(message);
+    this.name = "DatabaseWriteConflictError";
+  }
+}
 
 let WASM_PATH: string | null = null;
 
@@ -61,12 +76,15 @@ function readOne(db: SqlJsDatabase, sql: string, params?: unknown[]): Row | null
 export class SqliteStore {
   private dbPath: string;
   private db: SqlJsDatabase | null = null;
+  private lastKnownDiskHash: string | null = null;
+  private persistenceConflict = false;
 
   constructor(dbPath: string) {
-    this.dbPath = dbPath;
+    this.dbPath = path.resolve(dbPath);
   }
 
   async open(): Promise<DbConnection> {
+    if (this.db) throw new Error("database is already open in this SqliteStore instance");
     const SQL = await initSqlJs({ locateFile: () => resolveWasmPath() });
     const dir = path.dirname(this.dbPath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -74,10 +92,24 @@ export class SqliteStore {
     if (fs.existsSync(this.dbPath)) {
       buf = fs.readFileSync(this.dbPath);
     }
+    this.lastKnownDiskHash = buf ? this.hashBytes(buf) : null;
+    this.persistenceConflict = false;
+
     const db = new SQL.Database(buf);
     this.db = db;
-    this.applyMigrations(db);
-    this.persist();
+    try {
+      const versionBefore = this.getUserVersion(db);
+      this.applyMigrations(db);
+      const versionAfter = this.getUserVersion(db);
+      // Avoid rewriting a current database on every CLI read/open. Migrations and
+      // first-time initialization are persisted through the guarded writer path.
+      if (!buf || versionBefore !== versionAfter) this.persist();
+    } catch (error) {
+      db.close();
+      this.db = null;
+      this.lastKnownDiskHash = null;
+      throw error;
+    }
     return {
       db,
       close: () => this.close(),
@@ -88,14 +120,13 @@ export class SqliteStore {
 
   public close(): void {
     if (this.db) {
-      try {
-        fs.writeFileSync(this.dbPath, this.export());
-      } catch {
-        // best-effort persist
-      }
+      // Every mutation is persisted when it is applied. Never export on close:
+      // doing so would let an old in-memory snapshot overwrite a newer process.
       this.db.close();
       this.db = null;
     }
+    this.lastKnownDiskHash = null;
+    this.persistenceConflict = false;
   }
 
   private export(): Uint8Array {
@@ -105,11 +136,54 @@ export class SqliteStore {
 
   private persist(): void {
     if (!this.db) return;
-    try {
-      fs.writeFileSync(this.dbPath, this.db.export());
-    } catch {
-      // best-effort
+    if (this.persistenceConflict) {
+      throw new DatabaseWriteConflictError("this database instance is stale; close and reopen it before continuing");
     }
+
+    const lockPath = `${this.dbPath}.persist.lock`;
+    const lock = new ExclusiveProcessLock(lockPath, `database-persist:${process.pid}:${crypto.randomUUID()}`);
+    const acquired = lock.acquire();
+    if (!acquired.ok) {
+      // A competing writer or uncertain lock state means this process can no
+      // longer safely rely on its snapshot. Fail closed instead of retrying
+      // with potentially stale in-memory data.
+      this.persistenceConflict = true;
+      throw new DatabaseWriteConflictError(
+        `database writer lock unavailable (${acquired.code ?? "LOCK_FAILED"}); close and reopen the Bridge database`
+      );
+    }
+
+    const tempPath = `${this.dbPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    try {
+      const currentHash = fs.existsSync(this.dbPath)
+        ? this.hashBytes(fs.readFileSync(this.dbPath))
+        : null;
+      if (currentHash !== this.lastKnownDiskHash) {
+        this.persistenceConflict = true;
+        throw new DatabaseWriteConflictError();
+      }
+
+      const contents = this.db.export();
+      const fd = fs.openSync(tempPath, "wx", 0o600);
+      try {
+        fs.writeFileSync(fd, contents);
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      // Temp file is in the same directory so rename is an atomic replacement
+      // on supported local filesystems; the persistence lock serializes writers.
+      fs.renameSync(tempPath, this.dbPath);
+      this.lastKnownDiskHash = this.hashBytes(contents);
+    } finally {
+      try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch { /* best effort cleanup */ }
+      lock.release();
+    }
+  }
+
+  private hashBytes(contents: Uint8Array): string {
+    return crypto.createHash("sha256").update(contents).digest("hex");
   }
 
   private applyMigrations(db: SqlJsDatabase): void {
@@ -727,6 +801,9 @@ export class SqliteStore {
 
   private requireDb(): SqlJsDatabase {
     if (!this.db) throw new Error("database is not open");
+    if (this.persistenceConflict) {
+      throw new DatabaseWriteConflictError("database snapshot is stale; close and reopen the Bridge database");
+    }
     return this.db;
   }
 
