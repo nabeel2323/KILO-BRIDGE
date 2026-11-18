@@ -10,7 +10,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
-import { ensureBridgeConfig } from "../config";
+import { BridgeConfigSchema, ensureBridgeConfig, updateBridgeConfig } from "../config";
 import type { SqliteStore } from "../db";
 import type { ProjectRegistry } from "./registry";
 import { CONTROL_CENTER_HTML } from "./controlCenterPage";
@@ -481,26 +481,47 @@ export class ControlCenterServer {
       return;
     }
     if (route === "/api/settings" && method === "GET") {
-      const config = ensureBridgeConfig(this.bridgeRoot);
-      const worker = this.workerReadModel();
-      this.sendJson(response, 200, {
-        gates: {
-          workerEnabled: config.workerEnabled,
-          githubIntakeEnabled: config.githubIntakeEnabled,
-          githubIntakeAllowedRepositories: config.githubIntakeAllowedRepositories,
-        },
-        workerRunning: worker.running,
-        intakeRuntimeAvailable: false,
+      this.sendJson(response, 200, this.settingsReadModel());
+      return;
+    }
+
+    if (route === "/api/settings" && method === "POST") {
+      const body = await this.readJsonBody(request);
+      await this.updateSettings(response, body);
+      return;
+    }
+
+    if (route.startsWith("/api/projects/") && route.endsWith("/state") && method === "POST") {
+      const projectId = decodeURIComponent(route.slice("/api/projects/".length, -"/state".length));
+      if (!/^[a-z0-9][a-z0-9-]{0,80}$/.test(projectId)) {
+        this.sendJson(response, 400, { error: "Project identifier is invalid." });
+        return;
+      }
+      const body = await this.readJsonBody(request);
+      const state = body.state;
+      if (state !== "active" && state !== "disabled") {
+        this.sendJson(response, 400, { error: "Project state must be 'active' or 'disabled'." });
+        return;
+      }
+      const result = state === "active" ? this.registry.enable(projectId) : this.registry.disable(projectId);
+      if (!result.ok) {
+        this.sendJson(response, 404, { error: sanitizedText(result.error, 200) });
+        return;
+      }
+      this.store.insertAudit({
+        projectId,
+        actor: "local-operator",
+        action: "control_center.project_state_changed",
+        detail: JSON.stringify({ state }),
       });
+      this.sendJson(response, 200, this.projectsReadModel());
       return;
     }
 
     if (method === "POST") {
-      // State-changing project and configuration APIs are intentionally withheld
-      // until their authorization/audit policy and the isolated dispatcher exist.
       const body = await this.readJsonBody(request);
       void body;
-      this.sendJson(response, 409, { error: "This operation is not available until the audited Control Center settings API is implemented." });
+      this.sendJson(response, 404, { error: "Route not found." });
       return;
     }
     this.sendJson(response, 404, { error: "Route not found." });
@@ -568,6 +589,90 @@ export class ControlCenterServer {
     const session = this.createSession(response);
     this.store.insertAudit({ actor: "local-operator", action: "control_center.login" });
     this.sendJson(response, 200, { ok: true, csrfToken: session.csrfToken });
+  }
+
+  private settingsReadModel(): Record<string, unknown> {
+    const config = ensureBridgeConfig(this.bridgeRoot);
+    const worker = this.workerReadModel();
+    return {
+      gates: {
+        workerEnabled: config.workerEnabled,
+        githubIntakeEnabled: config.githubIntakeEnabled,
+        githubIntakeAllowedRepositories: config.githubIntakeAllowedRepositories,
+      },
+      pollIntervalMs: config.pollIntervalMs,
+      workerRunning: worker.running,
+      intakeRuntimeAvailable: false,
+      intakeRuntimeReason: "The dedicated intake service is not connected to a production-isolated task dispatcher yet.",
+    };
+  }
+
+  private async updateSettings(
+    response: ServerResponse,
+    body: Record<string, unknown>
+  ): Promise<void> {
+    const allowed = new Set([
+      "githubIntakeEnabled",
+      "workerEnabled",
+      "githubIntakeAllowedRepositories",
+      "pollIntervalMs",
+    ]);
+    const fields = Object.keys(body);
+    if (fields.length === 0 || fields.some((field) => !allowed.has(field))) {
+      this.sendJson(response, 400, { error: "Settings request contains no changes or an unsupported field." });
+      return;
+    }
+
+    // This milestone permits disabling gates but deliberately refuses to enable
+    // either autonomous executor until a real Windows Sandbox dispatcher exists.
+    if (body.githubIntakeEnabled === true || body.workerEnabled === true) {
+      this.sendJson(response, 409, {
+        error: "Automation cannot be enabled from the Control Center until isolated task dispatch and runtime acceptance are complete.",
+      });
+      return;
+    }
+    for (const key of ["githubIntakeEnabled", "workerEnabled"]) {
+      if (key in body && typeof body[key] !== "boolean") {
+        this.sendJson(response, 400, { error: key + " must be a boolean." });
+        return;
+      }
+    }
+    if ("pollIntervalMs" in body &&
+      (typeof body.pollIntervalMs !== "number" || !Number.isSafeInteger(body.pollIntervalMs) || body.pollIntervalMs < 1000 || body.pollIntervalMs > 3600000)) {
+      this.sendJson(response, 400, { error: "pollIntervalMs must be an integer from 1000 to 3600000." });
+      return;
+    }
+    if ("githubIntakeAllowedRepositories" in body &&
+      (!Array.isArray(body.githubIntakeAllowedRepositories) ||
+       !body.githubIntakeAllowedRepositories.every((entry) => typeof entry === "string"))) {
+      this.sendJson(response, 400, { error: "githubIntakeAllowedRepositories must be an array of owner/repo strings." });
+      return;
+    }
+
+    try {
+      const updated = updateBridgeConfig(this.bridgeRoot, (current) => {
+        const candidate = { ...current, ...body };
+        const parsed = BridgeConfigSchema.safeParse(candidate);
+        if (!parsed.success) {
+          throw Object.assign(new Error(parsed.error.issues.map((issue) => issue.message).join("; ")), { statusCode: 400 });
+        }
+        return parsed.data;
+      });
+      this.store.insertAudit({
+        actor: "local-operator",
+        action: "control_center.settings_changed",
+        detail: JSON.stringify({
+          fields: fields.sort(),
+          repositoryCount: updated.githubIntakeAllowedRepositories.length,
+          pollIntervalMs: updated.pollIntervalMs,
+        }),
+      });
+      this.sendJson(response, 200, this.settingsReadModel());
+    } catch (error) {
+      const statusCode = Number((error as { statusCode?: unknown })?.statusCode);
+      const status = Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 499 ? statusCode : 400;
+      this.sendJson(response, status, { error: sanitizedText((error as Error)?.message ?? "Invalid settings.", 300) });
+    }
   }
 
   private workerReadModel(): { running: boolean; pid: number | null; heartbeat: string | null } {
