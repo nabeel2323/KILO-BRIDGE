@@ -139,6 +139,17 @@ export class Worker {
       return failResult("task project is missing or disabled", "PROJECT_DISABLED");
     }
 
+    // Extend the same claim-owner lease to cover the complete isolated run,
+    // verification and report generation. Never change ownership or steal a lease.
+    const leaseTtlMs = Math.max(
+      this.opts.config.defaultTaskTimeoutMs,
+      project.config.taskTimeoutMs ?? 0
+    ) + 15 * 60 * 1000;
+    const renewed = this.lifecycle.resumeClaim(taskId, this.opts.workerId, leaseTtlMs);
+    if (!renewed.ok) {
+      return failResult(renewed.error ?? "task claim lease could not be renewed", "TASK_LEASE_RENEWAL_FAILED");
+    }
+
     const github = this.opts.githubFactory(project.config);
     try {
       await this.executeTask(project.config, github, task, true);
