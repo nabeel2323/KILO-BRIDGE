@@ -346,7 +346,6 @@ test("control center: authenticated SSE emits a snapshot and a refresh after per
       detail: "test-only",
     });
     const update = await readUntil("event: refresh", 7000);
-    const update = await readUntil("event: refresh", 7000);
     const updateId = update.match(/id: ([a-f0-9]{64})/);
     assert.ok(updateId, "refresh event must include a stable revision id");
     assert.notEqual(updateId![1], initialId![1], "persisted activity must advance the revision");
