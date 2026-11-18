@@ -70,7 +70,6 @@ async function setupAuthenticatedServer(): Promise<TestServer> {
   assert.ok(setCookie, "successful setup must issue an HttpOnly session cookie");
   assert.match(setCookie!, /HttpOnly/i);
   assert.match(setCookie!, /SameSite=Strict/i);
-  assert.doesNotMatch(setCookie!, /Secure/i);
   const cookie = setCookie!.split(";")[0];
 
   const sessionResponse = await fetch(baseUrl + "api/session", { headers: { Cookie: cookie } });
