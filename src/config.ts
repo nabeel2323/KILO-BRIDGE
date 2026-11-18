@@ -51,10 +51,9 @@ export function loadBridgeConfig(bridgeRoot: string): BridgeConfig {
   return BridgeConfigSchema.parse(raw);
 }
 
-export function saveBridgeConfig(bridgeRoot: string, config: BridgeConfig): void {
+function withBridgeConfigLock<T>(bridgeRoot: string, operation: (file: string) => T): T {
   const file = resolveConfigPath(bridgeRoot);
-  const dir = path.dirname(file);
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   const lock = new ExclusiveProcessLock(
     file + ".lock",
     "bridge-config:" + process.pid + ":" + crypto.randomUUID()
@@ -63,6 +62,14 @@ export function saveBridgeConfig(bridgeRoot: string, config: BridgeConfig): void
   if (!acquired.ok) {
     throw new Error("could not safely update bridge.config.json: " + acquired.error);
   }
+  try {
+    return operation(file);
+  } finally {
+    lock.release();
+  }
+}
+
+function writeBridgeConfigFile(file: string, config: BridgeConfig): void {
   const temp = file + "." + process.pid + "." + crypto.randomUUID() + ".tmp";
   try {
     const fd = fs.openSync(temp, "wx", 0o600);
@@ -75,8 +82,28 @@ export function saveBridgeConfig(bridgeRoot: string, config: BridgeConfig): void
     fs.renameSync(temp, file);
   } finally {
     try { if (fs.existsSync(temp)) fs.unlinkSync(temp); } catch { /* best effort cleanup */ }
-    lock.release();
   }
+}
+
+export function saveBridgeConfig(bridgeRoot: string, config: BridgeConfig): void {
+  withBridgeConfigLock(bridgeRoot, (file) => writeBridgeConfigFile(file, config));
+}
+
+/**
+ * Atomic read-modify-write for operator settings and CLI configuration changes.
+ * The current config is reloaded after taking the process lock so concurrent
+ * callers cannot silently apply updates to stale snapshots.
+ */
+export function updateBridgeConfig(
+  bridgeRoot: string,
+  update: (current: BridgeConfig) => unknown
+): BridgeConfig {
+  return withBridgeConfigLock(bridgeRoot, (file) => {
+    const current = loadBridgeConfig(bridgeRoot);
+    const validated = BridgeConfigSchema.parse(update(current));
+    writeBridgeConfigFile(file, validated);
+    return validated;
+  });
 }
 
 export function ensureBridgeConfig(bridgeRoot: string): BridgeConfig {
