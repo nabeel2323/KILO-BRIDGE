@@ -11,6 +11,7 @@ import type {
   LabelName,
   ProjectConfig,
   TaskRecord,
+  TaskStatus,
 } from "../types";
 import { failResult, okResult } from "../types";
 import { ProjectRegistry } from "./registry";
@@ -29,7 +30,7 @@ export interface GitHubIntakeDispatcher {
   /** Must return true only when the production-isolated execution path is fully available. */
   isReady(): boolean | Promise<boolean>;
   /** Starts the task asynchronously using the secured task runner. Must never fall back to host Kilo. */
-  dispatch(task: TaskRecord, claim: GitHubIntakeClaim): Promise<BridgeResult<{ executionId: string }>>;
+  dispatch(task: TaskRecord, claim: GitHubIntakeClaim): Promise<BridgeResult<{ executionId: string; taskStatus?: TaskStatus }>>;
 }
 
 export interface GitHubIntakeProvider {
@@ -315,19 +316,29 @@ export class GitHubIntakeService {
             continue;
           }
           this.store.upsertTask({ ...currentTask, executionId: dispatched.data.executionId, updatedAt: new Date().toISOString() });
-          const running = await provider.addLabels(candidate.number, [RUNNING_LABEL]);
-          if (!running.ok) {
-            this.store.updateGitHubIntakeClaim(claim.id, {
-              status: "RECONCILIATION_REQUIRED",
-              lastError: "execution started but kilo:running label reconciliation failed",
+          const persistedTask = this.store.getTask(taskId);
+          const finalTaskStatus = dispatched.data.taskStatus ?? persistedTask?.status;
+          if (finalTaskStatus === "REPORT_READY" || finalTaskStatus === "FAILED" || finalTaskStatus === "BLOCKED") {
+            this.store.updateGitHubIntakeClaim(claim.id, { status: finalTaskStatus, lastError: undefined });
+            this.audit(project.id, "github_intake.execution_completed", {
+              repository, issue: candidate.number, claimId: claim.id, taskId,
+              executionId: dispatched.data.executionId, taskStatus: finalTaskStatus,
             });
-            result.errors.push(`${repository}#${candidate.number}: execution started but running label needs reconciliation`);
-            continue;
+          } else {
+            const running = await provider.addLabels(candidate.number, [RUNNING_LABEL]);
+            if (!running.ok) {
+              this.store.updateGitHubIntakeClaim(claim.id, {
+                status: "RECONCILIATION_REQUIRED",
+                lastError: "execution started but kilo:running label reconciliation failed",
+              });
+              result.errors.push(`${repository}#${candidate.number}: execution started but running label needs reconciliation`);
+              continue;
+            }
+            this.store.updateGitHubIntakeClaim(claim.id, { status: "RUNNING", lastError: undefined });
+            this.audit(project.id, "github_intake.execution_started", {
+              repository, issue: candidate.number, claimId: claim.id, taskId, executionId: dispatched.data.executionId,
+            });
           }
-          this.store.updateGitHubIntakeClaim(claim.id, { status: "RUNNING", lastError: undefined });
-          this.audit(project.id, "github_intake.execution_started", {
-            repository, issue: candidate.number, claimId: claim.id, taskId, executionId: dispatched.data.executionId,
-          });
           result.executionsStarted += 1;
         }
       }
@@ -343,6 +354,9 @@ export class GitHubIntakeService {
   async startContinuous(intervalMs = 30_000): Promise<BridgeResult<void>> {
     if (this.opts.config.githubIntakeEnabled !== true) {
       return failResult("dedicated GitHub intake is disabled", "GITHUB_INTAKE_DISABLED");
+    }
+    if (!(await this.opts.dispatcher.isReady())) {
+      return failResult("the isolated execution backend is not ready", "INTAKE_EXECUTION_BACKEND_NOT_READY");
     }
     if (!Number.isSafeInteger(intervalMs) || intervalMs < 5_000) {
       return failResult("intake polling interval must be at least 5000ms", "INVALID_POLL_INTERVAL");
