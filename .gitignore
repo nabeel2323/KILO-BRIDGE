@@ -7,3 +7,9 @@ reports/
 .scratch/
 *.log
 bridge.config.json
+gh-bin/
+test-fixtures/
+scripts/phase312-diagnostics/
+scripts/phase312-staging/
+.kilo-bridge-integration/
+.kilo/
