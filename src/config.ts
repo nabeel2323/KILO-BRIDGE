@@ -109,9 +109,7 @@ export function updateBridgeConfig(
 export function ensureBridgeConfig(bridgeRoot: string): BridgeConfig {
   const file = resolveConfigPath(bridgeRoot);
   if (!fs.existsSync(file)) {
-    const defaults: BridgeConfig = BridgeConfigSchema.parse({});
-    saveBridgeConfig(bridgeRoot, defaults);
-    return defaults;
+    return updateBridgeConfig(bridgeRoot, (current) => current);
   }
   return loadBridgeConfig(bridgeRoot);
 }
