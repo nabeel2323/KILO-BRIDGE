@@ -52,6 +52,8 @@ To use a non-default Bridge root, set `KILO_BRIDGE_ROOT` before running either c
 - The first-run token is high entropy, one-time, and stored only as a digest.
 - The local operator password is derived with Node.js scrypt and a random salt. The plaintext password is never written to disk.
 - Session identifiers are random, held server-side in memory, and expire after eight hours. Restarting the server invalidates existing sessions.
+- The authenticated /api/events SSE stream is read-only, limited to two connections per session, and closed when the operator logs out. It sends an initial operational revision snapshot, then revision-change notifications and keep-alive heartbeats.
+- On initial connection or reconnect, the browser fetches the current database-backed view again. The SSE stream is a change-notification mechanism, not a durable event archive or substitute for the database task/audit history.
 - Session cookies are HttpOnly and SameSite=Strict. The current server uses plain HTTP on loopback, so the Secure cookie attribute is not set; the listener is not exposed to LAN/public interfaces.
 - Request bodies are limited to 64 KiB. Login attempts are rate-limited.
 - CSP, frame denial, content-type sniffing protection, referrer restrictions, and a restrictive Permissions Policy are applied.
@@ -73,7 +75,7 @@ The authentication file is located at `data/control-center-auth.json`. Protect t
 - Settings: current gate values, trusted repository allowlist, and polling interval. Repository allowlist and polling interval can be updated and are audited.
 - Project controls: an operator can enable or disable a registered project; the change is audited.
 
-All displayed information is derived from the Bridge database, registry, and configuration file. The initial implementation uses manual refresh; live SSE updates are not yet implemented.
+All displayed information is derived from the Bridge database, registry, and configuration file. The UI refreshes the current view when the authenticated SSE feed detects a change to the operational database watermark. Manual refresh remains available. Reconnection fetches a new authoritative snapshot; missed event notifications are not replayed as an audit history.
 
 ## Current limitations and safety gates
 
@@ -109,6 +111,6 @@ This is expected until the production-isolated dispatcher is connected to the ge
 
 ## Verification
 
-Automated coverage is provided in `tests/control-center.test.ts` for bootstrap-token hashing/consumption, loopback binding, password/session setup, authentication, Origin/CSRF controls, database-backed read models, path omission, fail-closed automation gates, audited repository/polling settings, and audited project-state changes.
+Automated coverage is provided in `tests/control-center.test.ts` for bootstrap-token hashing/consumption, loopback binding, password/session setup, authentication, Origin/CSRF controls, database-backed read models, path omission, fail-closed automation gates, audited repository/polling settings, audited project-state changes, and authenticated SSE snapshot/change notifications.
 
 Do not describe these tests as passing until the current Windows CI run or an equivalent local test execution has completed and its exact results have been recorded in the progress tracker.
