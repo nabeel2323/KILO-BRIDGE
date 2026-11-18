@@ -9,6 +9,7 @@ import { BridgeConfigSchema, ensureBridgeConfig } from "./config";
 import type { WorkerState, ProjectConfig, DoctorCheck } from "./types";
 import { LocalKiloIntegration, type Scenario } from "./components/localKiloIntegration";
 import type { SecurityProfileName } from "./components/security";
+import { ControlCenterServer, createControlCenterSetupToken } from "./components/controlCenter";
 
 function printJson(data: unknown): void {
   process.stdout.write(JSON.stringify(data, null, 2) + "\n");
@@ -43,6 +44,8 @@ function printHelp(): void {
   print("  projects template <type>       Print a project config template");
   print("  github bootstrap <project>     Auth check + initialize labels");
   print("  github test <project>          Test GitHub authentication");
+  print("  control-center setup           Generate one-time local browser setup token");
+  print("  control-center start [port]    Start authenticated loopback Control Center");
   print("  tasks [project] [status]       List tasks");
   print("  task <id>                      Show a task");
   print("  task execute --project <id> --issue <number> --confirm-issue <number>");
@@ -304,6 +307,62 @@ async function main(argv: string[]): Promise<number> {
           return 0;
         }
         err("unknown projects subcommand. Use: list | add | validate | enable | disable | inspect | template");
+        return 1;
+      }
+
+      case "control-center": {
+        await app.init(bridgeRoot);
+        if (sub === "setup") {
+          try {
+            const token = createControlCenterSetupToken(bridgeRoot);
+            print("Control Center one-time setup token (shown once):");
+            print(token);
+            print("");
+            print("Next: run 'kilo-bridge control-center start' and open the displayed loopback URL.");
+            print("Do not share this token. It is not stored in plaintext.");
+            app.store.close();
+            return 0;
+          } catch (error) {
+            app.store.close();
+            err(error instanceof Error ? error.message : String(error));
+            return 1;
+          }
+        }
+        if (sub === "start") {
+          const requestedPort = rest[0] === undefined ? 4190 : Number(rest[0]);
+          if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65535) {
+            app.store.close();
+            err("usage: kilo-bridge control-center start [port 0-65535]");
+            return 1;
+          }
+          const controlCenter = new ControlCenterServer({
+            bridgeRoot,
+            store: app.store,
+            registry: app.registry,
+            host: "127.0.0.1",
+            port: requestedPort,
+          });
+          const started = await controlCenter.start();
+          print("Kilo Bridge Control Center is running.");
+          print("URL: " + started.url);
+          print("Binding: " + started.host + " (loopback only)");
+          print("Press Ctrl+C in this terminal to stop the Control Center.");
+          const shutdown = (): void => {
+            void controlCenter.close().then(() => {
+              app.store.close();
+              process.exitCode = 0;
+            }).catch((error) => {
+              err("Control Center shutdown error: " + String(error));
+              app.store.close();
+              process.exitCode = 1;
+            });
+          };
+          process.once("SIGINT", shutdown);
+          process.once("SIGTERM", shutdown);
+          return 0;
+        }
+        app.store.close();
+        err("usage: kilo-bridge control-center setup | start [port]");
         return 1;
       }
 
@@ -587,6 +646,8 @@ async function main(argv: string[]): Promise<number> {
         print("  projects template <type>       Print a project config template");
         print("  github bootstrap <project>     Auth check + initialize labels");
         print("  github test <project>          Test GitHub authentication");
+        print("  control-center setup           Generate one-time local browser setup token");
+        print("  control-center start [port]    Start authenticated loopback Control Center");
         print("  tasks [project] [status]       List tasks");
         print("  task <id>                      Show a task");
         print("  logs <id>                      Show task logs/verifications");
