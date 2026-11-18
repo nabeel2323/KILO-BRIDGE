@@ -315,7 +315,8 @@ export class GitHubIntakeService {
             result.errors.push(`${repository}#${candidate.number}: dispatch outcome is uncertain or failed; automatic retry is prohibited`);
             continue;
           }
-          this.store.upsertTask({ ...currentTask, executionId: dispatched.data.executionId, updatedAt: new Date().toISOString() });
+          const latestTask = this.store.getTask(taskId) ?? currentTask;
+          this.store.upsertTask({ ...latestTask, executionId: dispatched.data.executionId, updatedAt: new Date().toISOString() });
           const persistedTask = this.store.getTask(taskId);
           const finalTaskStatus = dispatched.data.taskStatus ?? persistedTask?.status;
           if (finalTaskStatus === "REPORT_READY" || finalTaskStatus === "FAILED" || finalTaskStatus === "BLOCKED") {
