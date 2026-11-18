@@ -697,11 +697,7 @@ export class ControlCenterServer {
     const projects = this.registry.list();
     const tasks = this.taskListReadModel(50, 0);
     const claims = this.claimReadModel();
-    const taskIds = tasks.map((task) => task.id);
-    let activeExecutions = 0;
-    for (const taskId of taskIds) {
-      activeExecutions += this.store.listExecutions(taskId).filter((execution) => execution.status === "RUNNING").length;
-    }
+    const activeExecutions = this.store.countExecutionsByStatus("RUNNING");
     const worker = this.workerReadModel();
     return {
       generatedAt: new Date().toISOString(),
