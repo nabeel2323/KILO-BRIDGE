@@ -28,6 +28,17 @@ export const BridgeConfigSchema = z.object({
     "repository allowlist must not contain duplicates"
   ),
   ghBin: z.string().optional(),
+  // Separate explicit gate for the generalized Windows Sandbox execution backend.
+  // It defaults OFF and is not equivalent to enabling GitHub intake or the generic worker.
+  sandboxExecutionEnabled: z.boolean().default(false),
+  sandboxKiloExePath: z.string().default(""),
+  // OpenAI-compatible upstream endpoint; the secret itself is never persisted.
+  sandboxProviderBaseUrl: z.string().default(""),
+  sandboxProviderApiKeyEnv: z.string().default(""),
+  sandboxProviderModelId: z.string().default(""),
+  sandboxProviderApiKeyHeader: z.string().default("Authorization"),
+  sandboxProviderApiKeyPrefix: z.string().default("Bearer "),
+
 });
 
 export type BridgeConfig = z.infer<typeof BridgeConfigSchema>;
