@@ -2,6 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import fs from "node:fs";
 import { SqliteStore } from "../src/db";
@@ -128,6 +129,48 @@ test("db: stale snapshots fail closed and cannot overwrite a newer process write
   assert.ok(recovered.getTask(firstTask.id), "the first committed task remains present");
   assert.ok(recovered.getTask(secondTask.id), "the second committed task remains present");
   assert.equal(recovered.getTask("task-stale-write"), null, "the stale write must never reach disk");
+  recovered.close();
+  removeDir(dir);
+});
+
+test("db: a separate Node process cannot cause a stale parent snapshot to overwrite newer data", async () => {
+  const { store, dir, dbPath } = await openStore();
+  store.setMeta("parent.writer", "initial");
+  const compiledDbModule = path.resolve(__dirname, "../src/db.js");
+  const childProgram = [
+    'const { SqliteStore } = require(process.argv[1]);',
+    '(async () => {',
+    '  const childStore = new SqliteStore(process.argv[2]);',
+    '  await childStore.open();',
+    '  childStore.setMeta("child.writer", "committed");',
+    '  childStore.close();',
+    '})().catch((error) => {',
+    '  process.stderr.write(String(error && error.stack || error));',
+    '  process.exitCode = 1;',
+    '});',
+  ].join("\\n");
+
+  execFileSync(process.execPath, ["-e", childProgram, compiledDbModule, dbPath], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 30_000,
+    windowsHide: true,
+  });
+
+  // The parent still has the pre-child snapshot. It must be invalidated before
+  // it can export any state, even though the child was a distinct OS process.
+  assert.throws(
+    () => store.setMeta("parent.stale", "must-not-persist"),
+    /database changed since this process loaded it|database writer lock unavailable/
+  );
+  store.close();
+
+  const recovered = new SqliteStore(dbPath);
+  await recovered.open();
+  assert.equal(recovered.getMeta("parent.writer"), "initial");
+  assert.equal(recovered.getMeta("child.writer"), "committed");
+  assert.equal(recovered.getMeta("parent.stale"), null);
   recovered.close();
   removeDir(dir);
 });
