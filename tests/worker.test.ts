@@ -390,3 +390,114 @@ test("worker e2e: worker executes tasks when enabled (default)", async () => {
   assert.equal(task.status, "REPORT_READY", "task moves to REPORT_READY after execution");
   env.cleanup();
 });
+
+test("worker: claimed GitHub intake task uses Sandbox lifecycle without host Kilo", async () => {
+  const env = await makeWorkerEnv();
+  try {
+    const leaseOwner = "github-intake:test-host:501";
+    const now = new Date().toISOString();
+    const issueTask = {
+      id: "task-sandbox-dispatch",
+      projectId: env.config.id,
+      issueNumber: 1,
+      issueUrl: "https://github.com/test-owner/test-repo/issues/1",
+      title: "Sandbox-only task",
+      author: "authorized-user",
+      body: "Create a small file in the task worktree.",
+      status: "CLAIMED" as const,
+      idempotencyKey: crypto.createHash("sha256").update("sandbox-dispatch").digest("hex"),
+      attempt: 1,
+      leaseHolder: leaseOwner,
+      leaseExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+      createdAt: now,
+      updatedAt: now,
+    };
+    env.store.upsertTask(issueTask);
+
+    let sandboxCalls = 0;
+    const fakeRunner = {
+      readiness: () => ({ ready: true, reasons: [] }),
+      async run(
+        _task: { id: string; title: string; body: string },
+        options: { worktreePath: string; executionId?: string }
+      ) {
+        sandboxCalls++;
+        const output = path.join(options.worktreePath, "sandbox-output.txt");
+        const contents = "created by the isolated Sandbox runner";
+        fs.writeFileSync(output, contents, "utf8");
+        return {
+          executionId: options.executionId!,
+          finalStatus: "COMPLETED" as const,
+          startedAt: now,
+          completedAt: new Date().toISOString(),
+          durationMs: 10,
+          kiloExitCode: 0,
+          kiloVersion: "7.8.27",
+          model: "bridge-relay/bridge-model",
+          agent: "build",
+          providerRequests: 1,
+          toolEvidence: [{ name: "write", eventType: "tool_call" }],
+          artifacts: [{
+            path: "sandbox-output.txt",
+            action: "added" as const,
+            sha256: crypto.createHash("sha256").update(contents).digest("hex"),
+            size: Buffer.byteLength(contents),
+          }],
+          importedFiles: ["sandbox-output.txt"],
+          error: null,
+          cleanup: "complete" as const,
+          evidencePath: path.join(env.root, "data", "sandbox-evidence", options.executionId + ".json"),
+        };
+      },
+    };
+
+    (env.worker as any).opts.workerId = leaseOwner;
+    (env.worker as any).opts.config.workerEnabled = false;
+    (env.worker as any).opts.sandboxExecutionEnabled = true;
+    (env.worker as any).opts.sandboxRunner = fakeRunner;
+
+    const dispatched = await env.worker.dispatchClaimedSandboxTask(issueTask.id);
+    assert.equal(dispatched.ok, true, dispatched.error);
+    assert.equal(dispatched.data?.taskStatus, "REPORT_READY");
+    assert.equal(sandboxCalls, 1);
+    assert.equal(env.kiloCalls().length, 0, "host Kilo must not be used for Sandbox dispatch");
+
+    const completed = env.store.getTask(issueTask.id)!;
+    assert.equal(completed.status, "REPORT_READY");
+    assert.ok(completed.worktreePath);
+    assert.equal(
+      fs.readFileSync(path.join(completed.worktreePath!, "sandbox-output.txt"), "utf8"),
+      "created by the isolated Sandbox runner"
+    );
+    const executions = env.store.listExecutions(issueTask.id);
+    assert.equal(executions.length, 1);
+    assert.equal(executions[0].status, "COMPLETED");
+    assert.equal(
+      executions[0].eventLogPath,
+      path.join(env.root, "data", "sandbox-evidence", dispatched.data!.executionId + ".json")
+    );
+    assert.equal(env.store.listTransitions(issueTask.id).at(-1)?.toStatus, "REPORT_READY");
+  } finally {
+    env.cleanup();
+  }
+});
+
+test("worker: Sandbox dispatch fails closed when its dedicated gate is off", async () => {
+  const env = await makeWorkerEnv();
+  try {
+    let calls = 0;
+    (env.worker as any).opts.sandboxExecutionEnabled = false;
+    (env.worker as any).opts.sandboxRunner = {
+      readiness: () => ({ ready: true, reasons: [] }),
+      async run() { calls++; throw new Error("must not be called"); },
+    };
+    const result = await env.worker.dispatchClaimedSandboxTask("not-present");
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "SANDBOX_EXECUTION_DISABLED");
+    assert.equal(calls, 0);
+    assert.equal(env.kiloCalls().length, 0);
+    assert.equal(env.store.listTasksByProject(env.config.id).length, 0);
+  } finally {
+    env.cleanup();
+  }
+});
