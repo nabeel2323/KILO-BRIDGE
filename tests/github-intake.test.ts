@@ -219,3 +219,26 @@ test("GitHub intake: uncertain dispatcher result is persisted for reconciliation
     assert.equal(env.store.listGitHubIntakeClaims()[0].status, "RECONCILIATION_REQUIRED");
   } finally { env.cleanup(); }
 });
+
+
+test("GitHub intake: synchronous Sandbox dispatch records terminal claim state", async () => {
+  const env = await setup();
+  try {
+    (env.service as any).opts.dispatcher = {
+      isReady: () => true,
+      async dispatch(task: any) {
+        const current = env.store.getTask(task.id)!;
+        env.store.upsertTask({ ...current, status: "REPORT_READY" });
+        return { ok: true, data: { executionId: "execution-terminal", taskStatus: "REPORT_READY" } };
+      },
+    };
+    const result = await env.service.pollOnce();
+    assert.equal(result.ok, true, result.error);
+    const claim = env.store.getGitHubIntakeClaim("test-owner/test-repo", 42);
+    assert.ok(claim);
+    assert.equal(claim.status, "REPORT_READY");
+    assert.equal(env.store.listTasksByProject("test-project")[0].status, "REPORT_READY");
+  } finally {
+    env.cleanup();
+  }
+});
