@@ -318,13 +318,20 @@ test("control center: authenticated SSE emits a snapshot and a refresh after per
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         const remaining = deadline - Date.now();
-        const result = await Promise.race([
-          reader!.read(),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("SSE read timed out")), remaining)),
-        ]);
-        if (result.done) break;
-        collected += decoder.decode(result.value, { stream: true });
-        if (collected.includes(needle)) return collected;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const result = await Promise.race([
+            reader!.read(),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error("SSE read timed out")), remaining);
+            }),
+          ]);
+          if (result.done) break;
+          collected += decoder.decode(result.value, { stream: true });
+          if (collected.includes(needle)) return collected;
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
       }
       throw new Error("SSE event not received: " + needle);
     };
