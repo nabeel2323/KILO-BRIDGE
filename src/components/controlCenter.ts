@@ -209,9 +209,17 @@ export class ControlCenterServer {
   async start(): Promise<ControlCenterStartResult> {
     if (this.server) throw new Error("Control Center is already running.");
     const server = createServer((request, response) => {
-      void this.handle(request, response).catch(() => {
-        if (!response.headersSent) this.sendJson(response, 500, { error: "Internal Control Center error." });
-        else response.destroy();
+      void this.handle(request, response).catch((error: unknown) => {
+        if (response.headersSent) {
+          response.destroy();
+          return;
+        }
+        const statusCode = Number((error as { statusCode?: unknown })?.statusCode);
+        const safeStatus = Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 499 ? statusCode : 500;
+        const message = safeStatus === 500
+          ? "Internal Control Center error."
+          : sanitizedText((error as Error)?.message ?? "Request rejected.", 200);
+        this.sendJson(response, safeStatus, { error: message });
       });
     });
     this.server = server;
