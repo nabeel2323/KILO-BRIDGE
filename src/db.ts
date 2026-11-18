@@ -679,6 +679,30 @@ export class SqliteStore {
     return Number(row?.count ?? 0);
   }
 
+  /**
+   * Stable opaque watermark for SSE refresh notifications. It intentionally
+   * contains no task text, credentials, file paths, or user-controlled values.
+   */
+  getOperationalRevision(): string {
+    const db = this.requireDb();
+    const row = readOne(db, `SELECT
+      (SELECT COUNT(*) FROM tasks) AS task_count,
+      (SELECT COALESCE(MAX(updated_at), '') FROM tasks) AS task_updated,
+      (SELECT COUNT(*) FROM task_transitions) AS transition_count,
+      (SELECT COALESCE(MAX(created_at), '') FROM task_transitions) AS transition_updated,
+      (SELECT COUNT(*) FROM executions) AS execution_count,
+      (SELECT COALESCE(MAX(COALESCE(end_time, start_time)), '') FROM executions) AS execution_updated,
+      (SELECT COUNT(*) FROM verifications) AS verification_count,
+      (SELECT COALESCE(MAX(start_time), '') FROM verifications) AS verification_updated,
+      (SELECT COUNT(*) FROM reports) AS report_count,
+      (SELECT COALESCE(MAX(created_at), '') FROM reports) AS report_updated,
+      (SELECT COUNT(*) FROM audit_log) AS audit_count,
+      (SELECT COALESCE(MAX(created_at), '') FROM audit_log) AS audit_updated,
+      (SELECT COUNT(*) FROM github_intake_claims) AS claim_count,
+      (SELECT COALESCE(MAX(updated_at), '') FROM github_intake_claims) AS claim_updated`);
+    return crypto.createHash("sha256").update(JSON.stringify(row ?? {}), "utf8").digest("hex");
+  }
+
   private mapExecution(row: Row): ExecutionRecord {
     return {
       id: String(row.id),
