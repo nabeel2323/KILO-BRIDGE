@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { SqliteStore } from "../src/db";
+import { ensureBridgeConfig } from "../src/config";
 import { ProjectRegistry } from "../src/components/registry";
 import { ControlCenterServer, createControlCenterSetupToken } from "../src/components/controlCenter";
 import { makeTempDir, removeDir, makeProjectConfig, makeTaskRecord } from "./helpers/fixtures";
@@ -24,6 +25,7 @@ async function setupAuthenticatedServer(): Promise<TestServer> {
   const dbPath = path.join(root, "data", "test.sqlite");
   const store = new SqliteStore(dbPath);
   await store.open();
+  ensureBridgeConfig(root);
 
   const registry = new ProjectRegistry({
     upsertProject: (config, state) => store.upsertProject(config, state),
