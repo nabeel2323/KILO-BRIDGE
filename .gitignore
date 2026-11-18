@@ -9,6 +9,12 @@ reports/
 bridge.config.json
 gh-bin/
 test-fixtures/
+**/*agent-smoke-test/
+**/*phase31-security/
+**/*phase33-normal-coding/
+**/*phase33-smoke/
+**/*phase34-normal-coding/
+**/*phase34-smoke/
 scripts/phase312-diagnostics/
 scripts/phase312-staging/
 .kilo-bridge-integration/
