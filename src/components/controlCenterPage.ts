@@ -216,8 +216,8 @@ button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);bac
         var repos=byId("trusted-repositories").value.split(/\r?\n/).map(function(x){return x.trim();}).filter(Boolean);
         var interval=Number(byId("poll-interval").value);
         await api("/api/settings",{method:"POST",body:JSON.stringify({githubIntakeAllowedRepositories:repos,pollIntervalMs:interval})});
-        byId("settings-message").textContent="Settings saved and audited.";
         await renderSettings();
+        byId("settings-message").textContent="Settings saved and audited.";
       }catch(error){byId("settings-message").textContent=error.message||String(error);}
     });
     byId("disable-automation").addEventListener("click",async function(){
