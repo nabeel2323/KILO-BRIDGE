@@ -1,7 +1,7 @@
 # GitHub Control Center and Intake — Implementation Progress
 
 **Tracker version:** 1.0  
-**Status:** IN PROGRESS — planning and baseline inspection started  
+**Status:** PARTIAL — Phase 0.1 source changes committed; runtime verification pending  
 **Repository:** `nabeel2323/KILO-BRIDGE`  
 **Branch:** `v1-implementation`  
 **Baseline commit reviewed:** `e3ecd61d5eb77befcb8169069019d9f44b7cf769`  
@@ -14,7 +14,7 @@
 
 | Phase | Description | Status | Completion |
 |---|---|---|---:|
-| 0 | Repository boundary, baseline, and safety remediation | IN PROGRESS | 30% |
+| 0 | Repository boundary, baseline, and safety remediation | PARTIAL | 45% |
 | 1 | Configuration and durable data contracts | NOT STARTED | 0% |
 | 2 | Dedicated GitHub intake service | NOT STARTED | 0% |
 | 3 | Shared execution, evidence, and GitHub reconciliation | NOT STARTED | 0% |
@@ -23,7 +23,7 @@
 | 6 | Integration, hardening, and independent verification | NOT STARTED | 0% |
 | 7 | Documentation and release readiness | NOT STARTED | 0% |
 
-**Overall completion:** 4% (roadmap + initial source review only; no implementation phase is complete).
+**Overall completion:** 8% (planning files and one Phase 0.1 safety slice are committed; no implementation phase is complete).
 
 ## 2. Confirmed repository baseline
 
@@ -41,7 +41,7 @@
 
 | ID | Severity | Finding | Required action | Status |
 |---|---|---|---|---|
-| KB-IMPL-001 | CRITICAL | `KiloBridgeApp.init()` defaults `registerScs=true`; CLI initialization enables registration for the default Bridge root and contains a hard-coded `scs-platform` mapping. | Remove implicit project registration; make init neutral; preserve existing project records; never open the SCS path. | OPEN |
+| KB-IMPL-001 | CRITICAL | `KiloBridgeApp.init()` previously defaulted `registerScs=true`; CLI initialization enabled registration for the default Bridge root and contained a hard-coded `scs-platform` mapping. | Remove implicit project registration; make init neutral; preserve existing project records; never open the SCS path. | SOURCE CHANGES COMMITTED — UNVERIFIED |
 | KB-IMPL-002 | HIGH | No dedicated `githubIntakeEnabled` setting exists in `src/config.ts`. | Add false-by-default config gate and independent tests. | OPEN |
 | KB-IMPL-003 | HIGH | Existing `Worker` combines polling, claim labels, correction processing, and execution. | Extract shared execution from discovery; do not use Worker as the new intake service. | OPEN |
 | KB-IMPL-004 | HIGH | SQL.js writes whole database exports; current task idempotency lookup is project/Issue scoped and index is non-unique. | Design cross-process serialization and repository-scoped unique claims before parallel intake is allowed. | OPEN |
@@ -53,8 +53,8 @@
 - [x] Confirm repository and branch boundary.
 - [x] Inspect initialization, config, storage, worker, GitHub provider, and CLI source.
 - [x] Identify implicit SCS registration path without accessing the SCS workspace.
-- [ ] Remove implicit SCS registration from app and CLI initialization.
-- [ ] Add regression tests proving `init` never registers a project implicitly.
+- [x] Remove implicit SCS registration from app and CLI initialization (source change committed; runtime test pending).
+- [x] Add CLI regression assertions for an empty registry after init and no SCS doctor check (authored; not yet executed).
 - [ ] Audit all generic-worker execution and GitHub mutation paths when `workerEnabled=false`.
 - [ ] Add regression tests for disabled-worker execution/recovery/correction paths.
 - [ ] Confirm fixtures use only disposable local repositories and fake GitHub endpoints.
@@ -140,6 +140,7 @@
 | 2026-11-19 | 0 | GitHub repository and branch inspection | PASS | Repository `nabeel2323/KILO-BRIDGE`, branch `v1-implementation`, baseline `e3ecd61d5eb77befcb8169069019d9f44b7cf769`. |
 | 2026-11-19 | 0 | Source inspection | PARTIAL | Key source files inspected; identified default SCS registration, missing intake gate, coupled worker flow, schema v4. |
 | 2026-11-19 | 0 | Runtime build/test execution | NOT RUN | GitHub source connector does not execute commands on the operator's Windows machine. No build, test, or guest-run result is claimed for this session. |
+| 2026-11-19 | 0 | Phase 0.1 source update | PARTIAL | Commit `d9fb2093c16d4ad74367f2900b62c032d2ca7d4f`: removed app-level SCS auto-registration and doctor check; removed CLI SCS defaults and updated CLI regression expectations. No compile/test execution is claimed. |
 
 ### Runtime evidence inherited from earlier operator verification
 
@@ -150,11 +151,12 @@ The earlier project conversation reported that native Kilo integration scenarios
 | Date | Change | Evidence |
 |---|---|---|
 | 2026-11-19 | Created phased implementation plan and progress tracker. | Plan and tracker files in `docs/`. |
+| 2026-11-19 | Removed implicit SCS project registration and SCS CLI defaults. | `d9fb2093c16d4ad74367f2900b62c032d2ca7d4f`; runtime verification pending. |
 | 2026-11-19 | Recorded source-level safety findings KB-IMPL-001 through KB-IMPL-006. | Files inspected at baseline commit `e3ecd61d5eb77befcb8169069019d9f44b7cf769`. |
 
 ## 8. Current next implementation slice
 
-**Phase 0.1 — Remove implicit SCS registration and lock down initialization behavior.**
+**Phase 0.2 — Audit generic-worker disabled-state behavior and verify Phase 0.1 on Windows.**
 
 Required files likely include:
 - `src/app.ts`
