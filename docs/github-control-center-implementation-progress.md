@@ -18,12 +18,12 @@
 | 1 | Configuration and durable data contracts | IN PROGRESS | 80% |
 | 2 | Dedicated GitHub intake service | PARTIAL | 35% |
 | 3 | Shared execution, evidence, and GitHub reconciliation | IN PROGRESS | 10% |
-| 4 | Control Center backend and security | IN PROGRESS | 70% |
-| 5 | Control Center UI and live operations | PARTIAL | 50% |
-| 6 | Integration, hardening, and independent verification | PARTIAL | 15% |
-| 7 | Documentation and release readiness | PARTIAL | 15% |
+| 4 | Control Center backend and security | IN PROGRESS | 80% |
+| 5 | Control Center UI and live operations | PARTIAL | 70% |
+| 6 | Integration, hardening, and independent verification | PARTIAL | 20% |
+| 7 | Documentation and release readiness | PARTIAL | 20% |
 
-**Overall completion:** approximately 36% (repository safety remediation, independent intake gate, schema-v5 durable claims, fail-closed intake source, SQL.js stale-snapshot protection, locked atomic configuration updates, authenticated loopback Control Center server, database-backed read APIs, initial browser UI, audited project/trust/polling controls, CLI integration, operations documentation, and regression tests are committed. New database, Control Center, and config changes remain unverified by a current CI/test execution result. No end-to-end GitHub intake dispatch or generalized Sandbox task execution is complete).
+**Overall completion:** approximately 40% (repository safety remediation, independent intake gate, schema-v5 durable claims, fail-closed intake source, SQL.js stale-snapshot protection, locked atomic configuration updates, authenticated loopback Control Center server, database-backed read APIs, initial browser UI, audited project/trust/polling controls, CLI integration, authenticated SSE change notifications, operations documentation, and regression tests are committed. The new database, Control Center, SSE, and config changes remain unverified by a current CI/test execution result. No end-to-end GitHub intake dispatch or generalized Sandbox task execution is complete).
 
 ## 2. Confirmed repository baseline
 
@@ -111,11 +111,13 @@
 - [x] Add exact Host/Origin validation and per-session CSRF enforcement (commit `197cea3`).
 - [x] Add request-size limits, login throttling, CSP/security headers, safe errors, and non-loopback rejection (commits `197cea3`, `fdc1716`).
 - [x] Add data APIs for dashboard, projects, task pages/detail, executions, verifications, intake claims, settings view, and audit read model (commit `197cea3`; bounded task-page DB method `3a18cd4`).
+- [x] Add complete-database running-execution count and an opaque operational change watermark (commits `751e909`, `5e02938`, `8e6654d`).
 - [x] Omit local filesystem paths, claim tokens, raw audit detail, and secret-like error values from read models.
 - [x] Add audited configuration updates for repository allowlist and polling interval; gate updates may disable but never enable either autonomous executor (commit `1309711`).
 - [x] Add audited project enable/disable route protected by session, Origin, and CSRF checks (commit `1309711`).
 - [x] Use a cross-process lock + atomic rename for config updates; CLI configuration now uses the locked read-modify-write helper (commits `954a3fb`, `d4d95f1`, `0762db8`).
-- [ ] Execute the Control Center security and config-concurrency tests on Windows CI and verify cookie/browser behavior on the local Windows host.
+- [x] Add authenticated SSE endpoint with bounded per-session connections, current snapshot on connect/reconnect, revision-change notification, heartbeat, and logout cleanup (commits `d9b305c`, `cd11752`).
+- [ ] Execute the Control Center security, SSE, and config-concurrency tests on Windows CI and verify cookie/browser behavior on the local Windows host.
 
 ### Phase 5 — Control Center UI/live operations
 
@@ -126,6 +128,7 @@
 - [x] Implement review center and audit view (read-only for task approval/publication).
 - [x] Implement UI controls for project enable/disable with an audit entry.
 - [x] Implement UI for trusted repository list and polling interval; automation gates can be disabled but cannot be enabled from the UI (commit `8c9359c`).
+- [x] Connect authenticated EventSource; refresh current page when the persisted operational revision changes and reload the authoritative view after reconnect (commit `af6899e`).
 - [ ] Implement SSE or replay-safe polling/live updates; initial UI currently refreshes on demand.
 - [ ] Verify empty, failed, blocked, report-ready, large-list, and responsive states on a browser.
 
@@ -133,6 +136,8 @@
 
 - [x] Author Control Center tests for one-time token, password hashing, session issuance, loopback bind, authentication, Origin/CSRF, DB read models, path omission, and fail-closed settings mutation (`2502b05`).
 - [x] Add tests for audited repository/polling settings and project enable/disable (`a789fc5`).
+- [x] Add SSE snapshot/change revision test and clear test timeout timers (`07b53d7`, `bfdc202`, `42dfee9`).
+- [x] Add config defaults/update/malformed-JSON/active-lock regression suite (`tests/config.test.ts`, commit `05f6c62`).
 - [x] Author separate-process SQL.js stale-writer regression (`tests/db.test.ts`, commit `0d57999`).
 - [ ] Execute new Control Center/database tests and capture exact pass/fail/skip results.
 - [ ] Add migration/restart/concurrency tests beyond current test coverage.
@@ -149,7 +154,7 @@
 - [ ] Update architecture and developer guide.
 - [ ] Update installation, configuration, and authentication instructions.
 - [x] Add Control Center first-run, security, usage, limitations, and troubleshooting guide (`docs/control-center-operations.md`, commit `8ca8f0f`); link from README (commit `80a6e5e`).
-- [x] Update Control Center operations guide for audited controls, configuration locking, and actual limitations (`472af95`).
+- [x] Update Control Center operations guide for audited controls, configuration locking, SSE refresh/reconnect behavior, and actual limitations (`472af95`, `4ad9d31`).
 - [ ] Update remaining architecture, security, recovery, troubleshooting, and testing guides.
 - [ ] Update release notes and operator enablement/disablement procedure.
 - [ ] Record limitations, rollback, and recovery steps.
@@ -171,7 +176,9 @@
 | 2026-11-19 | 1 | Separate-process stale writer regression | TEST SOURCE COMMITTED; EXECUTION PENDING | Commit `0d57999` spawns a separate Node process against the same SQL.js file, writes through a distinct process snapshot, then verifies the parent stale writer is rejected and the child's committed value survives reopen. Windows CI result is not yet available through the connected status/run endpoints. |
 | 2026-11-19 | 4/5 | Local Control Center backend and initial UI | SOURCE + TESTS + DOCS COMMITTED; TEST EXECUTION PENDING | Server/read-model/CLI/UI commits: `197cea3`, `fdc1716`, `8772b65`, `d20a938`, `1f8377e`; tests `2502b05`; task paging `3a18cd4`; operator guide `8ca8f0f`; README link `80a6e5e`. Auth is one-time-token + scrypt + in-memory session; loopback/Host/Origin/CSRF/request limit/CSP protections are implemented in source. UI is read-only and explicitly reports intake runtime unavailable. No CI/test execution is claimed for these commits. |
 | 2026-11-19 | 1/4 | Atomic configuration updates | SOURCE COMMITTED; TEST EXECUTION PENDING | Commit `954a3fb` adds a locked read-modify-write helper, same-directory temp file + fsync + atomic rename; commits `d4d95f1` and `0762db8` route CLI config changes and initialization through the helper. Settings API uses the same helper. |
+| 2026-11-19 | 4/5/6 | Authenticated SSE change notifications | SOURCE + TEST SOURCE + DOCS COMMITTED; TEST EXECUTION PENDING | Commits `8e6654d`, `d9b305c`, `cd11752`, `af6899e`, `07b53d7`, `bfdc202`, `42dfee9`, `4ad9d31`: opaque operational DB watermark; authenticated SSE snapshot/refresh/heartbeat; two-stream per-session cap; reconnect snapshot behavior; logout closes streams; dashboard refreshes on change; SSE regression and operator docs. No test run has been verified for these commits. |
 | 2026-11-19 | 4/5 | Audited Control Center operator controls | SOURCE + TESTS + DOCS COMMITTED; TEST EXECUTION PENDING | Commits `1309711`, `8c9359c`, `a789fc5`, `472af95`: project enable/disable; trusted repository allowlist and poll interval updates; audit events; API rejects attempts to enable `workerEnabled` or `githubIntakeEnabled`; UI updated; docs now describe actual behavior. No new CI/test result has been retrieved. |
+| 2026-11-19 | 1/6 | Configuration defaults and fail-closed parsing tests | SOURCE + TEST SOURCE COMMITTED; TEST EXECUTION PENDING | Commit `1f592b7` makes malformed existing JSON a hard error instead of silently reverting to defaults. Commit `05f6c62` adds tests for both gates defaulting false, updater preservation, invalid JSON non-overwrite, and live-lock rejection. |
 
 ### Runtime evidence inherited from earlier operator verification
 
@@ -195,7 +202,7 @@ The SQL.js writer guard and separate-process regression source are committed, bu
 
 The production-execution blocker remains `WindowsSandboxTaskRunner`: current `launchWindowsSandbox()` is a fixture smoke harness, while generic worker execution still launches Kilo on the host. The next slice must stage a real per-execution worktree and task spec, launch the native Kilo runtime in a disposable guest, provide narrowly scoped provider connectivity without copying long-lived credentials, validate a matching execution-ID result manifest and artifact hashes, import only safe workspace changes, and clean up fail-closed on any missing evidence.
 
-The Control Center backend/UI are now a limited operator surface: project enable/disable and trusted-repository/polling configuration are auditable; neither automation gate can be enabled from the UI. The next web slice is SSE/replay and browser-level verification. The critical execution blocker remains a generalized Windows Sandbox runner and a real production-isolated dispatcher.
+The Control Center backend/UI are now a limited operator surface: project enable/disable and trusted-repository/polling configuration are auditable; neither automation gate can be enabled from the UI. An authenticated SSE change-notification feed is implemented; reconnects trigger a fresh snapshot rather than replaying historical notifications. The remaining web work is browser/security regression verification and any required hardening. The critical execution blocker remains a generalized Windows Sandbox runner and a real production-isolated dispatcher.
 
 Required files likely include:
 - `src/components/isolation.ts`
