@@ -252,12 +252,13 @@ button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);bac
     byId("content").innerHTML='<div class="section-head"><h2>Audit history</h2><span class="muted">Sensitive detail fields are not exposed</span></div>'+renderTable(["Time","Action","Actor","Project"],rows,"No audit events recorded.");
   }
   async function renderSettings(){
-    var d=await api("/api/settings");var g=d.gates;
+    var d=await api("/api/settings");var g=d.gates;var s=d.sandbox||{};
     var repositories=(g.githubIntakeAllowedRepositories||[]).join("\n");
-    var html='<div class="notice">Repository trust and polling interval can be configured here. The automation gates are intentionally not switchable on from this page: the production-isolated task dispatcher and runtime acceptance are not complete. You can always turn either gate off.</div>';
+    var html='<div class="notice">Configure the GitHub and Sandbox prerequisites here. The API-key value is never requested or stored by the Control Center; provision it as an environment variable for the Bridge process. Execution gates remain disabled until a real Windows Sandbox guest acceptance has been completed.</div>';
     html+='<div class="detail-grid">';
-    html+='<div class="card"><h2>GitHub intake</h2><div class="kv"><span>Configuration</span>'+badge(g.githubIntakeEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Sandbox execution gate</span>'+badge(g.sandboxExecutionEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Runtime available</span>'+badge(d.intakeRuntimeAvailable?"YES":"NO")+'</div><div class="kv"><span>Runtime</span><span class="muted">'+esc(d.intakeRuntimeReason||"Not connected")+'</span></div><div class="field"><label for="trusted-repositories">Trusted repositories (one owner/repo per line)</label><textarea id="trusted-repositories" rows="5" style="width:100%;border:1px solid var(--line);background:#0a1324;color:var(--text);border-radius:9px;padding:11px">'+esc(repositories)+'</textarea></div><div class="field"><label for="poll-interval">Polling interval in milliseconds (1,000–3,600,000)</label><input id="poll-interval" type="number" min="1000" max="3600000" step="1000" value="'+esc(d.pollIntervalMs)+'"></div><button id="save-intake-settings" class="primary">Save repository and polling settings</button></div>';
-    html+='<div class="card"><h2>Generic worker</h2><div class="kv"><span>Configuration</span>'+badge(g.workerEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Runtime status</span>'+badge(d.workerRunning?"RUNNING":"NOT RUNNING")+'</div><p class="muted">The generic worker gate is independent from GitHub intake.</p><p class="muted">Enabling either autonomous gate is intentionally blocked until isolated dispatch is verified. Use the control below only to enforce the disabled state.</p><button id="disable-automation">Keep both automation gates disabled</button></div></div><div id="settings-message" class="footer"></div>';
+    html+='<div class="card"><h2>GitHub intake</h2><div class="kv"><span>Intake gate</span>'+badge(g.githubIntakeEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Sandbox execution gate</span>'+badge(g.sandboxExecutionEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Runtime available</span>'+badge(d.intakeRuntimeAvailable?"YES":"NO")+'</div><div class="kv"><span>Runtime status</span><span class="muted">'+esc(d.intakeRuntimeReason||"Not ready")+'</span></div><div class="field"><label for="trusted-repositories">Trusted repositories (one owner/repo per line)</label><textarea id="trusted-repositories" rows="5" style="width:100%;border:1px solid var(--line);background:#0a1324;color:var(--text);border-radius:9px;padding:11px">'+esc(repositories)+'</textarea></div><div class="field"><label for="poll-interval">Polling interval in milliseconds (1,000–3,600,000)</label><input id="poll-interval" type="number" min="1000" max="3600000" step="1000" value="'+esc(d.pollIntervalMs)+'"></div><button id="save-intake-settings" class="primary">Save repository and polling settings</button></div>';
+    html+='<div class="card"><h2>Sandbox runtime</h2><div class="kv"><span>Standalone Kilo executable</span>'+badge(s.kiloExecutableConfigured?"CONFIGURED":"MISSING")+'</div><div class="kv"><span>Configured executable</span><span class="muted">'+esc(s.kiloExecutableName||"Not configured")+'</span></div><div class="kv"><span>Provider API key</span>'+badge(s.providerApiKeyPresent?"AVAILABLE":"NOT DETECTED")+'</div><div class="field"><label for="sandbox-kilo-exe">Standalone kilo.exe absolute path</label><input id="sandbox-kilo-exe" type="text" value="" placeholder="'+esc(s.kiloExecutableName?"Currently configured: "+s.kiloExecutableName:"C:\\\\Path\\\\To\\\\kilo.exe")+'"></div><div class="field"><label for="sandbox-provider-url">OpenAI-compatible provider base URL</label><input id="sandbox-provider-url" type="url" value="'+esc(s.providerBaseUrl||"")+'" placeholder="https://provider.example/v1"></div><div class="field"><label for="sandbox-provider-model">Upstream provider model ID</label><input id="sandbox-provider-model" type="text" value="'+esc(s.providerModelId||"")+'" placeholder="model-name"></div><div class="field"><label for="sandbox-api-env">API key environment variable name</label><input id="sandbox-api-env" type="text" value="'+esc(s.providerApiKeyEnv||"")+'" placeholder="KILO_BRIDGE_PROVIDER_API_KEY"></div><p class="muted">Set the variable value in the Windows environment before starting the Bridge. The secret itself is never submitted to this page or saved in bridge.config.json. Restart the Bridge process after changing the environment value.</p><div class="field"><label for="sandbox-api-header">API key header</label><input id="sandbox-api-header" type="text" value="'+esc(s.providerApiKeyHeader||"Authorization")+'"></div><div class="field"><label for="sandbox-api-prefix">API key prefix</label><input id="sandbox-api-prefix" type="text" value="'+esc(s.providerApiKeyPrefix||"Bearer ")+'"></div><div class="field"><label><input id="gh-enabled" type="checkbox" '+(g.ghEnabled?"checked":"")+'> GitHub integration prerequisite enabled</label></div><div class="field"><label><input id="kilo-enabled" type="checkbox" '+(g.kiloEnabled?"checked":"")+'> Kilo integration prerequisite enabled</label></div><button id="save-sandbox-settings" class="primary">Save Sandbox and prerequisite settings</button></div>';
+    html+='<div class="card"><h2>Execution safeguards</h2><div class="kv"><span>Generic worker</span>'+badge(g.workerEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Dedicated GitHub intake</span>'+badge(g.githubIntakeEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Windows Sandbox runner</span>'+badge(g.sandboxExecutionEnabled?"ENABLED":"DISABLED")+'</div><p class="muted">This page can configure prerequisites and turn automation off. It cannot enable an execution gate before the real guest-runtime release acceptance. The dedicated intake never falls back to host Kilo.</p><button id="disable-automation">Keep all execution gates disabled</button></div></div><div id="settings-message" class="footer"></div>';
     byId("content").innerHTML=html;
     byId("save-intake-settings").addEventListener("click",async function(){
       try{
@@ -265,13 +266,31 @@ button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);bac
         var interval=Number(byId("poll-interval").value);
         await api("/api/settings",{method:"POST",body:JSON.stringify({githubIntakeAllowedRepositories:repos,pollIntervalMs:interval})});
         await renderSettings();
-        byId("settings-message").textContent="Settings saved and audited.";
+        byId("settings-message").textContent="Repository and polling settings saved and audited.";
+      }catch(error){byId("settings-message").textContent=error.message||String(error);}
+    });
+    byId("save-sandbox-settings").addEventListener("click",async function(){
+      try{
+        var payload={
+          sandboxKiloExePath:byId("sandbox-kilo-exe").value.trim(),
+          sandboxProviderBaseUrl:byId("sandbox-provider-url").value.trim(),
+          sandboxProviderModelId:byId("sandbox-provider-model").value.trim(),
+          sandboxProviderApiKeyEnv:byId("sandbox-api-env").value.trim(),
+          sandboxProviderApiKeyHeader:byId("sandbox-api-header").value.trim(),
+          sandboxProviderApiKeyPrefix:byId("sandbox-api-prefix").value,
+          ghEnabled:byId("gh-enabled").checked,
+          kiloEnabled:byId("kilo-enabled").checked
+        };
+        await api("/api/settings",{method:"POST",body:JSON.stringify(payload)});
+        await renderSettings();
+        byId("settings-message").textContent="Sandbox prerequisites saved and audited. Execution gates are unchanged.";
       }catch(error){byId("settings-message").textContent=error.message||String(error);}
     });
     byId("disable-automation").addEventListener("click",async function(){
       try{
-        await api("/api/settings",{method:"POST",body:JSON.stringify({githubIntakeEnabled:false,workerEnabled:false})});
+        await api("/api/settings",{method:"POST",body:JSON.stringify({githubIntakeEnabled:false,workerEnabled:false,sandboxExecutionEnabled:false})});
         await renderSettings();
+        byId("settings-message").textContent="All execution gates are disabled.";
       }catch(error){byId("settings-message").textContent=error.message||String(error);}
     });
   }
