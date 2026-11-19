@@ -90,6 +90,7 @@ export interface SandboxRuntimeAttestationOptions {
   runnerFactory?: (config: BridgeConfig) => SandboxRunner;
   lockFactory?: (lockPath: string, owner: string) => ExclusiveProcessLock;
   intakeLockFactory?: (lockPath: string, owner: string) => ExclusiveProcessLock;
+  configLockFactory?: (lockPath: string, owner: string) => ExclusiveProcessLock;
 }
 
 function sha256(value: Uint8Array | string): string {
@@ -153,6 +154,7 @@ export class SandboxRuntimeAttestationService {
   private readonly runnerFactory: (config: BridgeConfig) => SandboxRunner;
   private readonly lock: ExclusiveProcessLock;
   private readonly intakePollGuard: ExclusiveProcessLock;
+  private readonly configWriteGuard: ExclusiveProcessLock;
   private runState: { state: "RUNNING" | "FAILED"; startedAt: string; reason?: string } | null = null;
 
   constructor(options: SandboxRuntimeAttestationOptions) {
@@ -186,6 +188,18 @@ export class SandboxRuntimeAttestationService {
       : new ExclusiveProcessLock(
           path.join(this.dataRoot, "github-intake.lock"),
           "sandbox-runtime-attestation-intake-guard:" + process.pid
+        );
+    // Hold the same config lock used by CLI/Control Center read-modify-write
+    // updates so provider and execution-gate state cannot drift mid-attestation.
+    const configLockPath = path.join(this.bridgeRoot, "bridge.config.json.lock");
+    this.configWriteGuard = options.configLockFactory
+      ? options.configLockFactory(
+          configLockPath,
+          "sandbox-runtime-attestation-config-guard:" + process.pid
+        )
+      : new ExclusiveProcessLock(
+          configLockPath,
+          "sandbox-runtime-attestation-config-guard:" + process.pid
         );
   }
 
@@ -305,13 +319,54 @@ export class SandboxRuntimeAttestationService {
       };
     }
 
+    const configGuard = this.configWriteGuard.acquire();
+    if (!configGuard.ok) {
+      this.intakePollGuard.release();
+      this.lock.release();
+      return {
+        ok: false,
+        code: "CONFIGURATION_IS_BUSY",
+        error: "Another Bridge process is updating configuration; retry the one-time verification after the update finishes.",
+        status: this.status(),
+      };
+    }
+
+    // Close the race between the first config read and taking the locks.
+    // From this point until cleanup, normal CLI/Control Center config writes
+    // are serialized behind configWriteGuard.
+    try {
+      config = this.getConfig();
+    } catch {
+      this.configWriteGuard.release();
+      this.intakePollGuard.release();
+      this.lock.release();
+      return {
+        ok: false,
+        code: "SANDBOX_CONFIG_UNAVAILABLE",
+        error: "Bridge configuration became unavailable before verification could start.",
+        status: this.status(),
+      };
+    }
+    if (config.workerEnabled || config.githubIntakeEnabled || config.sandboxExecutionEnabled || this.isIntakeRunning()) {
+      this.configWriteGuard.release();
+      this.intakePollGuard.release();
+      this.lock.release();
+      return {
+        ok: false,
+        code: "AUTOMATION_MUST_BE_DISABLED",
+        error: "Execution gates or GitHub intake changed before verification could reserve the runtime.",
+        status: this.status(),
+      };
+    }
+
     const startedAt = new Date().toISOString();
     this.runState = { state: "RUNNING", startedAt };
     void this.executeVerification(config, startedAt).catch((error) => {
       this.runState = { state: "FAILED", startedAt, reason: safeReason(error) };
     }).finally(() => {
-      // Release both locks only after the disposable guest and all cleanup
-      // checks have completed. The persistent execution gates remain off.
+      // Release all process-wide reservations only after the disposable guest,
+      // post-run config/runtime revalidation, and cleanup have completed.
+      this.configWriteGuard.release();
       this.intakePollGuard.release();
       this.lock.release();
     });
