@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { spawn } from "node:child_process";
 import path from "node:path";
 import { ensureBridgeConfig, updateBridgeConfig } from "../src/config";
 import { SqliteStore } from "../src/db";
@@ -301,20 +302,43 @@ test("Sandbox attestation: runtime identity changes and signed-file tampering in
   }
 });
 
-test("Sandbox attestation: a lock held by another Bridge process blocks verification until the active intake poll finishes", async () => {
+test("Sandbox attestation: a separate Bridge process holding the intake poll lock blocks verification", async () => {
   const env = await openEnvironment();
-  const intakeLock = new ExclusiveProcessLock(
-    path.join(env.root, "data", "github-intake.lock"),
-    "github-intake:external-process"
-  );
+  const lockPath = path.join(env.root, "data", "github-intake.lock");
+  const lockModulePath = path.resolve(__dirname, "../src/components/processLock.js");
+  const childProgram = [
+    'const { ExclusiveProcessLock } = require(process.argv[1]);',
+    'const lock = new ExclusiveProcessLock(process.argv[2], "github-intake:child-process");',
+    'const result = lock.acquire();',
+    'if (!result.ok) { process.stderr.write(result.error || "lock failed"); process.exit(2); }',
+    'process.stdout.write("LOCKED\\\\n");',
+    'process.stdin.once("data", () => { lock.release(); process.exit(0); });',
+  ].join("\\n");
+  const child = spawn(process.execPath, ["-e", childProgram, lockModulePath, lockPath], {
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  let childError = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => { childError += chunk; });
+
   try {
-    assert.equal(intakeLock.acquire().ok, true);
+    await new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code) => reject(new Error("intake-lock child exited before readiness (" + code + "): " + childError)));
+      let output = "";
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        output += chunk;
+        if (output.includes("LOCKED")) resolve();
+      });
+    });
+
     const service = await createService({
       root: env.root,
       store: env.store,
       identity: () => makeIdentity(),
     });
-
     const blocked = service.startVerification();
     assert.equal(blocked.ok, false);
     assert.equal(blocked.code, "INTAKE_IS_RUNNING");
@@ -323,13 +347,25 @@ test("Sandbox attestation: a lock held by another Bridge process blocks verifica
     assert.equal(ensureBridgeConfig(env.root).githubIntakeEnabled, false);
     assert.equal(ensureBridgeConfig(env.root).sandboxExecutionEnabled, false);
 
-    intakeLock.release();
+    child.stdin.write("release\\n");
+    const childExit = await new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code) => resolve(code));
+    });
+    assert.equal(childExit, 0, childError);
+
     const started = service.startVerification();
     assert.equal(started.ok, true);
     const status = await waitForTerminal(service);
     assert.equal(status.state, "VALID");
   } finally {
-    intakeLock.release();
+    try { child.stdin.write("release\\\\n"); } catch { /* child may already have exited */ }
+    if (child.exitCode === null) {
+      await new Promise<void>((resolve) => {
+        child.once("exit", () => resolve());
+        child.kill();
+      });
+    }
     env.cleanup();
   }
 });
