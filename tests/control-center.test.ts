@@ -20,7 +20,7 @@ interface TestServer {
   cleanup(): Promise<void>;
 }
 
-async function setupAuthenticatedServer(): Promise<TestServer> {
+async function setupAuthenticatedServer(controlOptions: Record<string, unknown> = {}): Promise<TestServer> {
   const root = makeTempDir("kilo-control-center-");
   const dbPath = path.join(root, "data", "test.sqlite");
   const store = new SqliteStore(dbPath);
@@ -58,7 +58,10 @@ async function setupAuthenticatedServer(): Promise<TestServer> {
   assert.equal(JSON.stringify(storedAuth).includes(token), false, "bootstrap token must never be stored in plaintext");
   assert.ok(storedAuth.bootstrapTokenHash, "only a token hash should be persisted");
 
-  const server = new ControlCenterServer({ bridgeRoot: root, store, registry, host: "127.0.0.1", port: 0 });
+  const server = new ControlCenterServer({
+    bridgeRoot: root, store, registry, host: "127.0.0.1", port: 0,
+    ...controlOptions,
+  });
   const address = await server.start();
   const baseUrl = address.url;
   const origin = new URL(baseUrl).origin;
@@ -353,6 +356,119 @@ test("control center: authenticated SSE emits a snapshot and a refresh after per
     assert.notEqual(updateId![1], initialId![1], "persisted activity must advance the revision");
   } finally {
     if (reader) await reader.cancel().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+
+test("control center: GitHub intake start and stop require authenticated CSRF-protected actions", async () => {
+  let running = false;
+  let starts = 0;
+  let stops = 0;
+  const env = await setupAuthenticatedServer({
+    intakeStatus: () => ({
+      enabled: true,
+      running,
+      dispatcherReady: true,
+      repositories: ["test-owner/control-center-test"],
+      reason: null,
+    }),
+    intakeStart: async () => {
+      starts++;
+      running = true;
+      return { ok: true };
+    },
+    intakeStop: () => {
+      stops++;
+      running = false;
+      return { ok: true };
+    },
+  });
+  try {
+    const origin = new URL(env.baseUrl).origin;
+    const status = await fetch(env.baseUrl + "api/intake/status", {
+      headers: { Cookie: env.cookie },
+    });
+    assert.equal(status.status, 200);
+    const before = await status.json() as any;
+    assert.equal(before.enabled, true);
+    assert.equal(before.running, false);
+    assert.equal(before.dispatcherReady, true);
+    assert.deepEqual(before.repositories, ["test-owner/control-center-test"]);
+
+    const unauthorized = await fetch(env.baseUrl + "api/intake/start", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: origin,
+        Cookie: env.cookie,
+      },
+      body: "{}",
+    });
+    assert.equal(unauthorized.status, 403);
+    assert.equal(starts, 0);
+
+    const start = await fetch(env.baseUrl + "api/intake/start", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: origin,
+        Cookie: env.cookie,
+        "X-CSRF-Token": env.csrfToken,
+      },
+      body: "{}",
+    });
+    assert.equal(start.status, 200);
+    assert.equal(starts, 1);
+    const started = await start.json() as any;
+    assert.equal(started.status.running, true);
+
+    const stop = await fetch(env.baseUrl + "api/intake/stop", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: origin,
+        Cookie: env.cookie,
+        "X-CSRF-Token": env.csrfToken,
+      },
+      body: "{}",
+    });
+    assert.equal(stop.status, 200);
+    assert.equal(stops, 1);
+    const stopped = await stop.json() as any;
+    assert.equal(stopped.status.running, false);
+    assert.ok(env.store.listAudit().some((event) => event.action === "control_center.github_intake_started"));
+    assert.ok(env.store.listAudit().some((event) => event.action === "control_center.github_intake_stopped"));
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("control center: intake status fails closed when lifecycle callbacks are not connected", async () => {
+  const env = await setupAuthenticatedServer();
+  try {
+    const response = await fetch(env.baseUrl + "api/intake/status", {
+      headers: { Cookie: env.cookie },
+    });
+    assert.equal(response.status, 200);
+    const status = await response.json() as any;
+    assert.equal(status.enabled, false);
+    assert.equal(status.running, false);
+    assert.equal(status.dispatcherReady, false);
+    assert.match(status.reason, /callbacks are not connected/i);
+
+    const start = await fetch(env.baseUrl + "api/intake/start", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: new URL(env.baseUrl).origin,
+        Cookie: env.cookie,
+        "X-CSRF-Token": env.csrfToken,
+      },
+      body: "{}",
+    });
+    assert.equal(start.status, 503);
+  } finally {
     await env.cleanup();
   }
 });
