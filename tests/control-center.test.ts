@@ -659,6 +659,15 @@ test("control center: activation requires valid attestation and proceeds Sandbox
     assert.equal(ensureBridgeConfig(env.root).sandboxExecutionEnabled, false);
 
     attestationValid = true;
+    const bundledRuntimeChange = await post({
+      sandboxExecutionEnabled: true,
+      sandboxProviderModelId: "changed-model",
+    });
+    assert.equal(bundledRuntimeChange.status, 409);
+    assert.equal((await bundledRuntimeChange.json() as any).code, "RUNTIME_SETTINGS_REQUIRE_GATES_OFF");
+    assert.equal(ensureBridgeConfig(env.root).sandboxExecutionEnabled, false);
+    assert.notEqual(ensureBridgeConfig(env.root).sandboxProviderModelId, "changed-model");
+
     const sandbox = await post({ sandboxExecutionEnabled: true });
     assert.equal(sandbox.status, 200);
     assert.equal(ensureBridgeConfig(env.root).sandboxExecutionEnabled, true);
