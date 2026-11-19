@@ -5,7 +5,7 @@
 **Repository:** nabeel2323/KILO-BRIDGE  
 **Branch:** v1-implementation  
 **Implementation baseline reviewed:** b652fdeb13e220776add26a0a6225300da7bae87
-**CI evidence:** Windows CI run 44436858231
+**Latest CI evidence:** Windows CI run 44437249678 on commit `ec93d0954e4daef94a69e7f3742afa4638814921`
 **Related Issue:** #1 — GitHub-Centric Control Center and Isolated GitHub Intake  
 **Last updated:** 2026-11-19
 
@@ -23,9 +23,9 @@
 | Control Center backend/security | Implemented | Windows CI green | Local browser acceptance pending |
 | Control Center settings UI | Implemented | Windows CI green | Local browser acceptance pending |
 | Operator runtime verification/attestation workflow | Implemented in source; real operator run pending | Windows CI green — 307 tests, 302 passed, 0 failed, 5 skipped | Blocking until operator-hosted verification succeeds |
-| Documentation synchronization | Operator, architecture, Sandbox, and credential-rotation guidance updated | Included in Windows CI run 44436858231 | Local browser acceptance pending |
+| Documentation synchronization | Operator, architecture, Sandbox, and credential-rotation guidance updated | Included in Windows CI runs 44436858231 and 44437249678 | Local browser acceptance pending |
 
-Windows CI run `44436858231` on commit `b652fdeb13e220776add26a0a6225300da7bae87` passed dependency installation, source/test TypeScript checking, build, and the full test suite: **307 tests, 302 passed, 0 failed, 5 skipped**. This run includes the version-2 HMAC credential-binding implementation and its provider-key rotation regression test. The earlier 295-test run and the first 306-test run are superseded. The post-job cleanup emitted a non-fatal Git submodule warning for `test-fixtures/agent-smoke-test`; the workflow conclusion remained SUCCESS. This is code-level CI evidence only, not proof that a real task has run in the operator's Windows Sandbox guest.
+Windows CI run `44436858231` on commit `b652fdeb13e220776add26a0a6225300da7bae87` passed dependency installation, source/test TypeScript checking, build, and the full test suite: **307 tests, 302 passed, 0 failed, 5 skipped**. The tracker-inclusive follow-up run `44437249678` on commit `ec93d0954e4daef94a69e7f3742afa4638814921` also completed successfully, including dependency installation, source/test TypeScript checking, build, and the full test suite with the same totals: **307 tests, 302 passed, 0 failed, 5 skipped**. The earlier 295-test and first 306-test runs are superseded. This is code-level CI evidence only, not proof that a real task has run in the operator's Windows Sandbox guest.
 
 ## 2. Operational safety state
 
@@ -49,10 +49,10 @@ No production GitHub Issue was processed as part of this implementation work. No
 | 0 | Repository boundary, safe defaults, worker isolation safeguards | COMPLETE — source + CI | None for this scoped work |
 | 1 | Configuration, schema-v5 claims, SQL.js concurrency protection | COMPLETE — source + CI | Operator DB runtime concurrency is not covered by hosted CI |
 | 2 | Dedicated GitHub discovery, eligibility, durable claims, live gates | COMPLETE — source + CI | Live intake remains deliberately disabled |
-| 3 | Claim-bound dispatcher, Sandbox execution contract, evidence and report lifecycle | PARTIAL — source + prior CI | Real guest task, successful attestation, and recovery acceptance |
+| 3 | Claim-bound dispatcher, Sandbox execution contract, evidence and report lifecycle | PARTIAL — source + CI green | Real guest task, successful attestation, and recovery acceptance |
 | 4 | Authenticated loopback Control Center backend and APIs | COMPLETE — source + CI | Local browser acceptance |
-| 5 | Control Center UI, configuration, SSE refresh, operator controls | COMPLETE — source; latest CI pending | Local browser acceptance of attestation and staged activation UX |
-| 6 | Integration hardening, tests, Windows CI | PARTIAL | Latest branch CI, guest runtime, browser acceptance, disposable-repository pilot |
+| 5 | Control Center UI, configuration, SSE refresh, operator controls | COMPLETE — source + CI | Local browser acceptance of attestation and staged activation UX |
+| 6 | Integration hardening, tests, Windows CI | PARTIAL — source + latest branch CI green | Guest runtime, browser acceptance, disposable-repository pilot |
 | 7 | Architecture, execution, recovery, testing, operator documentation | IN PROGRESS | This documentation commit and continued synchronization |
 
 No overall percentage is published. A percentage would conceal the remaining guest-runtime and operator acceptance blockers.
@@ -104,7 +104,7 @@ No overall percentage is published. A percentage would conceal the remaining gue
 | Field | Value |
 |---|---|
 | Workflow | Windows CI |
-| Run | 44431059408 |
+| Run | 44431059408 (historical) |
 | Commit | d654e5f18c6e99ce136c613da727915cb21b7b17 |
 | Dependency installation | PASS |
 | Source/test TypeScript checks | PASS |
@@ -116,6 +116,24 @@ No overall percentage is published. A percentage would conceal the remaining gue
 | Conclusion | SUCCESS |
 
 Hosted Windows CI validates compilation/build, automated fixtures, generated provider bridge syntax, guest path/XML construction, fail-closed gate behavior, claim-bound worker lifecycle, Control Center settings security/redaction, and test behavior. It does not have the operator's configured Kilo executable, upstream provider credentials, or a verified interactive Windows Sandbox runtime; it is not a real guest-run acceptance result.
+
+### Latest branch verification
+
+| Field | Value |
+|---|---|
+| Workflow | Windows CI |
+| Run | [44437249678](https://github.com/nabeel2323/KILO-BRIDGE/actions/runs/44437249678) |
+| Commit | `ec93d0954e4daef94a69e7f3742afa4638814921` |
+| Dependency installation | PASS |
+| Source/test TypeScript checks | PASS |
+| Build | PASS |
+| Tests | 307 total |
+| Passed | 302 |
+| Failed | 0 |
+| Skipped | 5 |
+| Conclusion | SUCCESS |
+
+This run checks the tracker update itself as well as the committed implementation. The five skipped tests are reported as skipped, not passed. Hosted CI remains distinct from local browser acceptance and an actual Windows Sandbox guest run.
 
 ## 6. Remaining critical release work
 
@@ -192,6 +210,7 @@ Documentation must distinguish code-level CI proof from guest runtime proof and 
 | 2026-11-19 | `5caf7b0`, `44ae94a`, `2938113` | Attestation format v2 binds the provider API-key value using an HMAC derived from the local signing key; provider credential rotation changes the runtime fingerprint without persisting or displaying the key. Added provider-key rotation regression. | SOURCE + TEST COMMITTED |
 | 2026-11-19 | `fc340a8`, `b652fde` | Updated Control Center and Windows Sandbox operator docs for keyed credential binding, expiry, and retest requirements. | DOCS COMMITTED |
 | 2026-11-19 | Windows CI `44436858231` / commit `b652fde13e220776add26a0a6225300da7bae87` | Dependency installation, TypeScript, build, and complete test suite. | PASS — 307 total, 302 passed, 0 failed, 5 skipped |
+| 2026-11-19 | Windows CI `44437249678` / commit `ec93d0954e4daef94a69e7f3742afa4638814921` | Re-ran dependency installation, TypeScript, build, and complete suite after the tracker was updated. | PASS — 307 total, 302 passed, 0 failed, 5 skipped |
 | 2026-11-19 | Operator-hosted Windows Sandbox guest execution | Generalized runner with disposable marker task and signed attestation workflow. | NOT YET RUN — no operator runtime proof |
 | 2026-11-19 | Local browser acceptance | Operator browser walkthrough of Control Center. | NOT YET RUN |
 | 2026-11-19 | Disposable GitHub Issue pilot | End-to-end claim → guest → artifacts → verification → report. | BLOCKED until operator attestation and browser acceptance |
