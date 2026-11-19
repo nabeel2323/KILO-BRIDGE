@@ -337,6 +337,9 @@ async function main(argv: string[]): Promise<number> {
             registry: app.registry,
             host: "127.0.0.1",
             port: requestedPort,
+            intakeStatus: () => app.githubIntakeStatus(),
+            intakeStart: () => app.githubIntakeStartContinuous(),
+            intakeStop: () => app.githubIntakeStop(),
           });
           const started = await controlCenter.start();
           print("Kilo Bridge Control Center is running.");
