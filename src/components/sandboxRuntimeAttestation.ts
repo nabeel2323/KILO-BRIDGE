@@ -242,6 +242,15 @@ export class SandboxRuntimeAttestationService {
     if (this.runState?.state === "RUNNING" || this.lock.isHeldByThisInstance()) {
       return { ok: false, code: "SANDBOX_ATTESTATION_RUNNING", error: "A Sandbox runtime verification is already running.", status: this.status() };
     }
+    const existingAttestation = this.status();
+    if (existingAttestation.valid) {
+      return {
+        ok: false,
+        code: "SANDBOX_ATTESTATION_ALREADY_VALID",
+        error: "A current Sandbox runtime attestation is already valid. Retest only after it expires or a bound runtime component changes.",
+        status: existingAttestation,
+      };
+    }
     let config: BridgeConfig;
     try {
       config = this.getConfig();
