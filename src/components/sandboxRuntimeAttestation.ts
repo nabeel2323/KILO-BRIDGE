@@ -89,6 +89,7 @@ export interface SandboxRuntimeAttestationOptions {
   isIntakeRunning?: () => boolean;
   runnerFactory?: (config: BridgeConfig) => SandboxRunner;
   lockFactory?: (lockPath: string, owner: string) => ExclusiveProcessLock;
+  intakeLockFactory?: (lockPath: string, owner: string) => ExclusiveProcessLock;
 }
 
 function sha256(value: Uint8Array | string): string {
@@ -151,6 +152,7 @@ export class SandboxRuntimeAttestationService {
   private readonly isIntakeRunning: () => boolean;
   private readonly runnerFactory: (config: BridgeConfig) => SandboxRunner;
   private readonly lock: ExclusiveProcessLock;
+  private readonly intakePollGuard: ExclusiveProcessLock;
   private runState: { state: "RUNNING" | "FAILED"; startedAt: string; reason?: string } | null = null;
 
   constructor(options: SandboxRuntimeAttestationOptions) {
@@ -171,6 +173,19 @@ export class SandboxRuntimeAttestationService {
       : new ExclusiveProcessLock(
           path.join(this.dataRoot, "sandbox-runtime-attestation.lock"),
           "sandbox-runtime-attestation:" + process.pid
+        );
+    // Reserve the exact lock used by GitHubIntakeService.pollOnce for the full
+    // disposable verification. This blocks another Bridge process from
+    // starting a poll/claim while the attestation guest is running, including
+    // the interval between continuous polling ticks.
+    this.intakePollGuard = options.intakeLockFactory
+      ? options.intakeLockFactory(
+          path.join(this.dataRoot, "github-intake.lock"),
+          "sandbox-runtime-attestation-intake-guard:" + process.pid
+        )
+      : new ExclusiveProcessLock(
+          path.join(this.dataRoot, "github-intake.lock"),
+          "sandbox-runtime-attestation-intake-guard:" + process.pid
         );
   }
 
@@ -279,11 +294,25 @@ export class SandboxRuntimeAttestationService {
       };
     }
 
+    const intakeGuard = this.intakePollGuard.acquire();
+    if (!intakeGuard.ok) {
+      this.lock.release();
+      return {
+        ok: false,
+        code: "INTAKE_IS_RUNNING",
+        error: "The cross-process GitHub intake poll lock is held; wait for the active poll to finish and stop intake before verification.",
+        status: this.status(),
+      };
+    }
+
     const startedAt = new Date().toISOString();
     this.runState = { state: "RUNNING", startedAt };
     void this.executeVerification(config, startedAt).catch((error) => {
       this.runState = { state: "FAILED", startedAt, reason: safeReason(error) };
     }).finally(() => {
+      // Release both locks only after the disposable guest and all cleanup
+      // checks have completed. The persistent execution gates remain off.
+      this.intakePollGuard.release();
       this.lock.release();
     });
     return {
