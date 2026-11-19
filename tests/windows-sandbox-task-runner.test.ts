@@ -163,14 +163,12 @@ test("sandbox runner: WSB logon command uses the guest-mapped bootstrap path and
   const hostBootstrap = hostInbox + "\\bootstrap.ps1";
   const xml = buildWsb(hostInbox, hostOutbox, hostResponses, hostBootstrap, EXECUTION_ID, 60_000);
 
-  assert.match(
-    xml,
-    /-File &quot;C:\\Users\\WDAGUtilityAccount\\Desktop\\BridgeInbox\\bootstrap\\.ps1&quot;/
-  );
-  assert.doesNotMatch(xml, /-File &quot;C:\\Bridge\\Sandbox Runs/);
+  const guestBootstrap = "C:\\Users\\WDAGUtilityAccount\\Desktop\\BridgeInbox\\bootstrap.ps1";
+  assert.ok(xml.includes(`-File &quot;${guestBootstrap}&quot;`));
+  assert.ok(!xml.includes(`-File &quot;${hostBootstrap}&quot;`));
   assert.ok(xml.includes(`<HostFolder>${hostInbox.replace("&", "&amp;")}</HostFolder>`));
   assert.doesNotMatch(xml, /&amp;amp;/);
-  const guestResponses = String.raw`C:\Users\WDAGUtilityAccount\Desktop\BridgeProviderResponses`;
+  const guestResponses = "C:\\Users\\WDAGUtilityAccount\\Desktop\\BridgeProviderResponses";
   assert.ok(xml.includes(`<HostFolder>${hostResponses}</HostFolder><SandboxFolder>${guestResponses}</SandboxFolder><ReadOnly>true</ReadOnly>`));
   assert.throws(
     () => buildWsb(hostInbox, hostOutbox, hostResponses, hostInbox + "\\wrong.ps1", EXECUTION_ID, 60_000),
