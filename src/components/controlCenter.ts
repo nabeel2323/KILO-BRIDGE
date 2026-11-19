@@ -834,6 +834,21 @@ export class ControlCenterServer {
     }
   }
 
+  private safeProviderBaseUrl(value: string): string {
+    try {
+      const url = new URL(value);
+      // Never echo user-info, query tokens, or fragments from a manually
+      // edited config file into the browser settings model.
+      url.username = "";
+      url.password = "";
+      url.search = "";
+      url.hash = "";
+      return url.toString();
+    } catch {
+      return "";
+    }
+  }
+
   private settingsReadModel(): Record<string, unknown> {
     const config = ensureBridgeConfig(this.bridgeRoot);
     const worker = this.workerReadModel();
@@ -860,7 +875,7 @@ export class ControlCenterServer {
       sandbox: {
         kiloExecutableConfigured: Boolean(sandboxKiloExecutable),
         kiloExecutableName: sandboxKiloExecutable ? path.win32.basename(sandboxKiloExecutable) : null,
-        providerBaseUrl: config.sandboxProviderBaseUrl,
+        providerBaseUrl: this.safeProviderBaseUrl(config.sandboxProviderBaseUrl),
         providerModelId: config.sandboxProviderModelId,
         providerApiKeyEnv: config.sandboxProviderApiKeyEnv,
         providerApiKeyPresent,
