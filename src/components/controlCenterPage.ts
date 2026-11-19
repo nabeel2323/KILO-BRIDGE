@@ -191,9 +191,31 @@ button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);bac
     });
   }
   async function renderGitHub(){
-    var d=await api("/api/intake-claims");
+    var pair=await Promise.all([api("/api/intake-claims"),api("/api/intake/status")]);
+    var d=pair[0],status=pair[1];
+    var startEnabled=Boolean(status.enabled&&status.dispatcherReady&&!status.running);
+    var controls=status.running
+      ? '<button id="stop-intake">Stop automatic intake</button>'
+      : '<button id="start-intake" class="primary" '+(startEnabled?'':'disabled')+'>Start automatic intake</button>';
+    var reason=status.reason?'<p class="muted">'+esc(status.reason)+'</p>':'<p class="muted">Sandbox dispatcher reports ready. Starting intake will poll only trusted repositories and Issues bearing kilo:ready.</p>';
     var rows=d.claims.map(function(c){return '<tr><td><div class="row-title">'+esc(c.repositoryFullName)+' #'+esc(c.issueNumber)+'</div><small class="muted">'+esc(c.projectId)+'</small></td><td>'+badge(c.status)+'</td><td>'+esc(c.updatedAt)+'</td><td>'+esc(c.taskId||"—")+'</td><td>'+esc(c.lastError||"—")+'</td></tr>';});
-    byId("content").innerHTML='<div class="notice">The intake claim history below comes from the durable database. Polling is not running unless a separately verified intake service is explicitly started. No Issue is executed by viewing this page.</div><div class="section-head"><h2>Persisted intake claims</h2><span class="muted">'+esc(d.claims.length)+' returned</span></div>'+renderTable(["Repository / Issue","State","Updated","Task","Last error"],rows,"No intake claims have been recorded.");
+    var html='<div class="card"><div class="section-head"><h2>Automatic GitHub intake</h2>'+badge(status.running?"RUNNING":status.enabled?"ENABLED · STOPPED":"DISABLED")+'</div>';
+    html+='<div class="detail-grid"><div><div class="kv"><span>Intake gate</span>'+badge(status.enabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Sandbox dispatcher</span>'+badge(status.dispatcherReady?"READY":"NOT READY")+'</div><div class="kv"><span>Trusted repositories</span><span>'+esc((status.repositories||[]).join(", ")||"None configured")+'</span></div></div><div><p class="muted">The service starts only after an explicit operator action. Opening or refreshing this page never polls GitHub.</p>'+reason+controls+'</div></div></div>';
+    html+='<div class="notice">Each eligible Issue is claimed once, validated against the repository and author allowlists, and executed only through the isolated Sandbox dispatcher. Uncertain outcomes are held for reconciliation rather than retried.</div>';
+    html+='<div class="section-head"><h2>Persisted intake claims</h2><span class="muted">'+esc(d.claims.length)+' returned</span></div>'+renderTable(["Repository / Issue","State","Updated","Task","Last error"],rows,"No intake claims have been recorded.");
+    byId("content").innerHTML=html;
+    var startButton=byId("start-intake");
+    if(startButton)startButton.addEventListener("click",async function(){
+      startButton.disabled=true;
+      try{await api("/api/intake/start",{method:"POST",body:"{}"});await renderGitHub();}
+      catch(error){showError(error);}
+    });
+    var stopButton=byId("stop-intake");
+    if(stopButton)stopButton.addEventListener("click",async function(){
+      stopButton.disabled=true;
+      try{await api("/api/intake/stop",{method:"POST",body:"{}"});await renderGitHub();}
+      catch(error){showError(error);}
+    });
   }
   async function renderTasks(){
     var d=await api("/api/tasks?limit=100");cachedTasks=d.tasks||[];
