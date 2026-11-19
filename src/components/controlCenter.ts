@@ -966,6 +966,31 @@ export class ControlCenterServer {
         return;
       }
     }
+
+    const runtimeBoundFields = [
+      "sandboxKiloExePath",
+      "sandboxProviderBaseUrl",
+      "sandboxProviderApiKeyEnv",
+      "sandboxProviderModelId",
+      "sandboxProviderApiKeyHeader",
+      "sandboxProviderApiKeyPrefix",
+    ];
+    if (runtimeBoundFields.some((field) => field in body)) {
+      const current = ensureBridgeConfig(this.bridgeRoot);
+      const sandboxWillRemainEnabled = "sandboxExecutionEnabled" in body
+        ? body.sandboxExecutionEnabled === true
+        : current.sandboxExecutionEnabled;
+      const intakeWillRemainEnabled = "githubIntakeEnabled" in body
+        ? body.githubIntakeEnabled === true
+        : current.githubIntakeEnabled;
+      if (sandboxWillRemainEnabled || intakeWillRemainEnabled) {
+        this.sendJson(response, 409, {
+          error: "Disable GitHub intake and Windows Sandbox execution before changing a runtime-bound executable or provider setting; a new attestation will be required.",
+          code: "RUNTIME_SETTINGS_REQUIRE_GATES_OFF",
+        });
+        return;
+      }
+    }
     if ("pollIntervalMs" in body &&
       (typeof body.pollIntervalMs !== "number" || !Number.isSafeInteger(body.pollIntervalMs) || body.pollIntervalMs < 1000 || body.pollIntervalMs > 3600000)) {
       this.sendJson(response, 400, { error: "pollIntervalMs must be an integer from 1000 to 3600000." });
