@@ -6,7 +6,7 @@ The Kilo Bridge Control Center is an authenticated browser interface served by t
 
 The dedicated intake service uses durable GitHub claims and a claim-bound Windows Sandbox dispatcher. It does not use generic worker polling and never falls back to host Kilo. The dispatcher continues through Bridge worktree, security, verification, report, and GitHub feedback lifecycle. Dedicated intake does not approve publication, push, merge, or deploy.
 
-**Current limitation:** the generalized Sandbox runner has source, build, Windows CI, and regression-test coverage, but a real guest task has not yet been verified on the operator's Windows machine. The Control Center currently rejects attempts to enable execution gates until a real guest verification/attestation workflow has been implemented.
+**Current release gate:** the operator-hosted one-time verification and signed attestation workflow is implemented in source. It has not yet completed on the operator's actual Windows Sandbox. Keep all execution gates off until the Settings action succeeds on that machine and the local attestation status is VALID.
 
 ## Requirements
 
@@ -58,7 +58,7 @@ Protect data/control-center-auth.json and the Bridge data directory with appropr
 - Tasks/executions: task body, lifecycle, execution summary, verifications, and reports.
 - Review: report-ready, blocked, failed, and correction states; it does not grant publication approval.
 - Activity/audit: operator actions and timestamps.
-- Settings: provider/runtime configuration, trusted repository list, polling interval, prerequisite switches, and gate status.
+- Settings: provider/runtime configuration, trusted repository list, polling interval, prerequisite switches, signed runtime-attestation status, and staged execution-gate controls.
 
 The page refreshes the current authoritative view when SSE reports an operational change. It also supports manual refresh; missed SSE events are not replayed as historical audit events.
 
@@ -76,6 +76,14 @@ The API-key value must be provisioned in the environment of the Bridge process a
 
 Provider URLs must use HTTPS, except HTTP on 127.0.0.1 or localhost; embedded credentials, query strings, and fragments are rejected. The host relay refuses redirects.
 
+### One-time runtime verification
+
+After configuring the executable, provider URL/model, and API-key environment-variable name, make sure `workerEnabled`, `sandboxExecutionEnabled`, and `githubIntakeEnabled` are all false and stop any running intake service. Then select **Run one-time Sandbox verification** in Settings.
+
+The Bridge creates a disposable empty workspace under `data/sandbox-runtime-verification`. It uses an in-memory runner configuration that temporarily sets only `sandboxExecutionEnabled=true`; it does not change `bridge.config.json`. The guest is asked to write one execution-ID/nonce-bound marker using Kilo's native `write` tool. Acceptance requires a matching execution UUID, successful guest/provider/Kilo stages, zero Kilo exit code, at least one upstream provider request, a native write-tool event, exact marker content, a matching artifact SHA-256/size declaration, the runner's bounded evidence file, and complete cleanup.
+
+On success, the Bridge writes an HMAC-signed local attestation with a 24-hour expiry. The signing key is stored separately under `data`. The attestation contains no task prompt, nonce, provider request body, API-key value, or raw Kilo output. It is bound to the Kilo/Sandbox executable hashes and versions, provider URL/model and non-secret auth configuration identity, Node/OS identity, and runner contract hash. A missing/invalid signature, expiry, or runtime fingerprint change requires a new verification. A still-valid attestation is not run again unnecessarily.
+
 ## Execution gates and automatic intake
 
 | Gate | Purpose | Fresh-install default |
@@ -86,19 +94,23 @@ Provider URLs must use HTTPS, except HTTP on 127.0.0.1 or localhost; embedded cr
 
 The repository allowlist defaults to empty; this trusts no repository. ghEnabled and kiloEnabled are prerequisites, not automatic execution gates.
 
-The dedicated intake path checks both intake and Sandbox gates before GitHub discovery and re-reads live config on every poll. Disabling either gate, a prerequisite, or the allowlist stops future polling. The dispatcher constructs its Worker with workerEnabled=false; a dedicated task can execute only through the Sandbox runner.
+The dedicated intake path checks both intake and Sandbox gates plus the current signed runtime attestation before GitHub discovery and dispatch. It re-reads live config and revalidates the attestation on every readiness/dispatch check. Expiry or runtime drift makes dispatcher readiness false. The dispatcher constructs its Worker with `workerEnabled=false`; a dedicated task can execute only through the Sandbox runner.
 
-**Do not enable an execution gate or start automatic intake yet.** Settings can prepare provider/runtime configuration and trusted repositories, and can switch gates off. The Settings API rejects attempts to switch workerEnabled, sandboxExecutionEnabled, or githubIntakeEnabled on until a real Sandbox guest verification/attestation path exists and has passed. Do not edit the config file manually to bypass this restriction.
+The Settings workflow has three separate steps:
 
-Once that release prerequisite exists, the intended workflow is an explicit operator activation followed by an explicit Start automatic intake action. From then on eligible kilo:ready Issues are processed automatically; there is no per-Issue Run button.
+1. **Verify:** run the one-time disposable Sandbox verification while all execution gates are off. Only a successful current attestation is accepted.
+2. **Enable Sandbox:** after `runtimeAttestation.valid=true`, explicitly enable `sandboxExecutionEnabled`. This does not enable GitHub intake.
+3. **Enable intake:** after Sandbox is already enabled, GitHub/Kilo prerequisites are enabled, at least one trusted repository is configured, and dispatcher readiness is true, explicitly enable `githubIntakeEnabled`. Then use the separate GitHub intake **Start** control to begin polling. Enabling a gate never starts polling automatically.
+
+The legacy `workerEnabled` gate cannot be enabled through this Control Center workflow. The API refuses enabling intake and disabling Sandbox in the same request, and requires intake to be disabled before Sandbox can be turned off. Do not edit the config file manually to bypass the attestation or activation rules.
 
 Stop prevents new polling ticks; it does not forcibly terminate an execution already running. Allow it to finish and reconcile its durable claim before restarting.
 
 ## Current verification
 
-Windows CI run 44431059408, commit d654e5f18c6e99ce136c613da727915cb21b7b17, passed dependency installation, source/test TypeScript checking, build, and the full test suite: **295 tests, 290 passed, 0 failed, 5 skipped**.
+Windows CI run 44431059408, commit d654e5f18c6e99ce136c613da727915cb21b7b17, passed dependency installation, source/test TypeScript checking, build, and the full test suite: **295 tests, 290 passed, 0 failed, 5 skipped**. This run predates the signed-attestation, staged-gate, and current regression-test commits; the latest branch tip still requires its own CI result.
 
-This result is code-level CI evidence. It does not demonstrate that the generalized runner completed a real task inside the operator's Windows Sandbox guest or that the browser has been visually accepted on the operator's machine.
+This result is code-level CI evidence only. It does not demonstrate that the generalized runner completed a real task inside the operator's Windows Sandbox guest or that the browser has been visually accepted on the operator's machine.
 
 ## Troubleshooting
 
@@ -110,9 +122,13 @@ Use the exact loopback URL printed by the Control Center, including its port. A 
 
 Before password configuration, run control-center setup again to rotate the one-time token. Once a password is configured, the setup command will not reset it. Account-recovery tooling is not currently available; do not manually edit the auth JSON.
 
+### Runtime attestation is invalid or requires retest
+
+Check the reason shown in Settings. Common causes include missing Windows Sandbox feature/interactive desktop, missing standalone `kilo.exe`, invalid provider URL/model, missing API-key environment variable, expired 24-hour attestation, or a changed runtime fingerprint. Keep gates off, correct the prerequisite, and run the one-time verification again. If a previous verification failed, inspect the bounded evidence file under `data/sandbox-evidence`; do not manually create or edit an attestation file.
+
 ### Intake cannot start
 
-Inspect Settings and the intake status reason. Preconditions include both dedicated gates, GitHub/Kilo prerequisites, non-empty repository trust, exactly one active project mapping, allowed authors, GitHub authentication, Windows Sandbox readiness, a standalone executable, and valid provider settings.
+Inspect Settings and the intake status reason. Preconditions include a current valid runtime attestation, both dedicated gates, GitHub/Kilo prerequisites, non-empty repository trust, exactly one active project mapping, allowed authors, GitHub authentication, Windows Sandbox readiness, a standalone executable, and valid provider settings.
 
 ### Task/claim missing or uncertain
 
