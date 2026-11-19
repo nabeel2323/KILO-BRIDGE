@@ -21,10 +21,21 @@ src/                 TypeScript source
     report.ts        report generator (markdown, comment body)
     security.ts      deny-by-default policy, kilo.json, redaction
     verification.ts  command selection/tokenization, suite execution
-    worker.ts        poll/discover/claim/execute/verify/report/publish flow
+    worker.ts        generic worker and claim-bound task lifecycle
     worktree.ts      isolated worktree lifecycle, diff, commit, push
+    githubIntake.ts  dedicated gated polling, durable claim/reconciliation
+    sandboxGitHubIntakeDispatcher.ts  claim validation and Sandbox-only dispatch
+    windowsSandboxTaskRunner.ts       network-disabled Windows Sandbox execution
+    sandboxRuntimeAttestation.ts      signed disposable runtime acceptance proof
+    controlCenter.ts                  loopback authenticated HTTP/API server
+    controlCenterPage.ts              Control Center UI
 tests/               node:test suites (compiled to dist-test/tests/)
   helpers/           mock-gh, mock-kilo, worker-env, fixtures
+  config.test.ts     atomic/fail-closed bridge configuration
+  db.test.ts         schema, persistence, and stale-writer safety
+  control-center.test.ts               auth, settings, SSE, attestation gate API
+  windows-sandbox-task-runner.test.ts  manifest/path safety and disabled gate
+  sandbox-runtime-attestation.test.ts  signed proof, expiry, drift, failure cleanup
 dist/                compiled CLI output (tsc)
 dist-test/           compiled test output (tsc)
 ```
@@ -43,9 +54,11 @@ dist-test/           compiled test output (tsc)
 | `node dist/cli.js worker start [--dry-run] [--project <id>]` | Run one worker poll |
 | `node dist/cli.js verify --project <id>` | Run independent verification |
 | `node dist/cli.js tasks|task|logs|reports` | Query task state |
+| `node dist/cli.js control-center setup` | Generate one-time local Control Center setup token |
+| `node dist/cli.js control-center start [port]` | Start authenticated loopback Control Center |
 
-## Test Suites (131 tests)
-All suites run under `node:test`:
+## Test Suites
+All suites run under `node:test`. Do not treat historical test counts in older reports as the current suite size. The latest verified baseline and the current branch CI status are recorded in `docs/github-control-center-implementation-progress.md`.
 - `cli.test.js` — CLI command behavior
 - `db.test.js` — SqliteStore CRUD, migrations, persistence
 - `github.test.js` — GitHubProvider mock interactions
@@ -69,6 +82,9 @@ All suites run under `node:test`:
 - **No reasoning stored**: Kilo chain-of-thought events are filtered out of event logs.
 - **Worker lock**: file-based lock prevents concurrent workers.
 - **Git worktree isolation**: each task gets its own worktree and feature branch.
+- **Dedicated intake**: durable repository/Issue/generation claims dispatch only through the claim-bound Windows Sandbox runner; it never falls back to host Kilo.
+- **Runtime attestation**: a signed 24-hour local proof from a disposable guest write-task is required by both the Control Center activation API and the intake dispatcher.
+- **Execution gates**: fresh-install defaults are false; Sandbox activation follows a valid attestation; GitHub intake is a second separate gate; the legacy generic worker cannot be enabled through the Control Center.
 
 ## Environment Notes
 - Node v26.4.0 on Windows: `gh` and `kilo` CLIs may not be installed; `doctor` reports them as non-fatal.
