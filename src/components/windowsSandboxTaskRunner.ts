@@ -12,12 +12,14 @@ const SANDBOX_EXE = path.join(process.env.WINDIR ?? "C:\\Windows", "System32", "
 const GUEST_DESKTOP = "C:\\Users\\WDAGUtilityAccount\\Desktop";
 const GUEST_INBOX = path.win32.join(GUEST_DESKTOP, "BridgeInbox");
 const GUEST_OUTBOX = path.win32.join(GUEST_DESKTOP, "BridgeOutbox");
+const GUEST_PROVIDER_RESPONSES = path.win32.join(GUEST_DESKTOP, "BridgeProviderResponses");
 const GUEST_WORK = path.win32.join(GUEST_DESKTOP, "work");
 const PROVIDER_PORT = 34621;
 const MAX_FILES = 30_000;
 const MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 128 * 1024 * 1024;
+const MAX_TOTAL_PROVIDER_RESPONSE_BYTES = 256 * 1024 * 1024;
 const MAX_PROVIDER_REQUESTS = 128;
 const MAX_MANIFEST_BYTES = 8 * 1024 * 1024;
 const MAX_TOOL_EVIDENCE_ITEMS = 10_000;
@@ -190,7 +192,7 @@ export function buildGuestProviderBridge(): string {
   return [
     '"use strict";',
     'const fs=require("node:fs"),path=require("node:path"),http=require("node:http"),crypto=require("node:crypto");',
-    'const OUTBOX=process.argv[2],PORT=Number(process.argv[3]||34621),MAX_BODY=8*1024*1024,TIMEOUT=15*60*1000;',
+    'const OUTBOX=process.argv[2],RESPONSE_BOX=process.argv[3],PORT=Number(process.argv[4]||34621),MAX_BODY=8*1024*1024,TIMEOUT=15*60*1000;',
     'function json(res,code,value){const body=Buffer.from(JSON.stringify(value));res.writeHead(code,{"content-type":"application/json","content-length":body.length,"cache-control":"no-store"});res.end(body);}',
     'const server=http.createServer((req,res)=>{',
     ' if(req.method==="GET"&&req.url==="/health")return json(res,200,{status:"healthy",protocolVersion:1});',
@@ -199,12 +201,12 @@ export function buildGuestProviderBridge(): string {
     ' const chunks=[];let total=0;req.on("data",chunk=>{total+=chunk.length;if(total>MAX_BODY){req.destroy();return;}chunks.push(chunk);});',
     ' req.on("end",()=>{const body=Buffer.concat(chunks);let payload;try{payload=JSON.parse(body.toString("utf8"));}catch{return json(res,400,{error:{message:"invalid request"}});}',
     ' if(!payload||typeof payload!=="object"||Array.isArray(payload)||!Array.isArray(payload.messages))return json(res,400,{error:{message:"invalid request"}});',
-    ' const id=crypto.randomUUID(),requestFile=path.join(OUTBOX,"provider-request-"+id+".json"),responseFile=path.join(OUTBOX,"provider-response-"+id+".ndjson"),temp=requestFile+".tmp";',
+    ' const id=crypto.randomUUID(),requestFile=path.join(OUTBOX,"provider-request-"+id+".json"),responseFile=path.join(RESPONSE_BOX,"provider-response-"+id+".ndjson"),temp=requestFile+".tmp";',
     ' const envelope={protocolVersion:1,id,method:"POST",path:"/v1/chat/completions",bodyBase64:body.toString("base64")};',
     ' try{fs.writeFileSync(temp,JSON.stringify(envelope),{flag:"wx"});fs.renameSync(temp,requestFile);}catch{try{fs.unlinkSync(temp);}catch{}return json(res,503,{error:{message:"provider relay unavailable"}});}',
     ' let offset=0,carry="",headersSent=false,complete=false;const started=Date.now();',
     ' const timer=setInterval(()=>{if(complete||res.destroyed){clearInterval(timer);return;}',
-    ' if(Date.now()-started>TIMEOUT){complete=true;clearInterval(timer);if(!headersSent)json(res,504,{error:{message:"provider relay timed out"}});else res.end();try{fs.unlinkSync(requestFile);}catch{}try{fs.unlinkSync(responseFile);}catch{}return;}',
+    ' if(Date.now()-started>TIMEOUT){complete=true;clearInterval(timer);if(!headersSent)json(res,504,{error:{message:"provider relay timed out"}});else res.end();try{fs.unlinkSync(requestFile);}catch{}return;}',
     ' if(!fs.existsSync(responseFile))return;let data;try{data=fs.readFileSync(responseFile);}catch{return;}',
     ' if(data.length<offset){complete=true;clearInterval(timer);if(!headersSent)json(res,502,{error:{message:"provider response reset"}});else res.end();return;}',
     ' const fresh=data.subarray(offset);offset=data.length;const records=(carry+fresh.toString("utf8")).split(/\\r?\\n/);carry=records.pop()||"";',
@@ -213,8 +215,8 @@ export function buildGuestProviderBridge(): string {
     ' else if(record.type==="chunk"&&headersSent&&typeof record.data==="string"){try{res.write(Buffer.from(record.data,"base64"));}catch{}}',
     ' else if(record.type==="error"){if(!headersSent)json(res,502,{error:{message:String(record.message||"provider relay failed")}});else res.end();complete=true;clearInterval(timer);}',
     ' else if(record.type==="end"){if(!headersSent)json(res,502,{error:{message:"provider returned no response"}});else res.end();complete=true;clearInterval(timer);}}',
-    ' if(complete){try{fs.unlinkSync(requestFile);}catch{}try{fs.unlinkSync(responseFile);}catch{}}',
-    ' },20);res.on("close",()=>{if(complete)return;complete=true;clearInterval(timer);try{fs.unlinkSync(requestFile);}catch{}try{fs.unlinkSync(responseFile);}catch{}});',
+    ' if(complete){try{fs.unlinkSync(requestFile);}catch{}}',
+    ' },20);res.on("close",()=>{if(complete)return;complete=true;clearInterval(timer);try{fs.unlinkSync(requestFile);}catch{}});',
     ' });});',
     'server.listen(PORT,"127.0.0.1",()=>process.stdout.write("provider-ready\\n"));',
     'server.on("error",error=>{process.stderr.write("provider-start-failed: "+String(error&&error.message||error)+"\\n");process.exitCode=1;});'
@@ -223,7 +225,7 @@ export function buildGuestProviderBridge(): string {
 
 export function buildGuestBootstrap(): string {
   const lines = [
-    'param([string]$InBox,[string]$OutBox,[string]$WorkDir,[string]$ExecutionId,[int]$TimeoutMs)',
+    'param([string]$InBox,[string]$OutBox,[string]$ResponseBox,[string]$WorkDir,[string]$ExecutionId,[int]$TimeoutMs)',
     '$ErrorActionPreference="Stop";$ProgressPreference="SilentlyContinue"',
     '$ResultPath=Join-Path $OutBox ("task-result-"+$ExecutionId+".json")',
     '$Stages=New-Object System.Collections.Generic.List[object];$Evidence=New-Object System.Collections.Generic.List[object];$Artifacts=New-Object System.Collections.Generic.List[object]',
@@ -236,14 +238,14 @@ export function buildGuestBootstrap(): string {
     'function ToolEvidence([string]$File){$items=New-Object System.Collections.Generic.List[object];if(-not(Test-Path -LiteralPath $File -PathType Leaf)){return $items};foreach($line in Get-Content -LiteralPath $File){if([string]::IsNullOrWhiteSpace($line)){continue};try{$event=$line|ConvertFrom-Json;$type=[string]$event.type;$part=$event.properties.part;$name="";if($part -and [string]$part.type -eq "tool"){if($part.tool -is [string]){$name=[string]$part.tool}elseif($part.name -is [string]){$name=[string]$part.name}};if(-not $name -and $type -match "tool"){foreach($v in @($event.tool,$event.name,$event.data.tool,$event.data.name)){if($v -is [string] -and $v.Length -gt 0){$name=$v;break}}};if($name){$items.Add([pscustomobject]@{name=$name;eventType=$type;timestamp=$(if($event.timestamp -is [string]){$event.timestamp}else{$null})})}}catch{}};return $items}',
     'try{',
     ' Stage "guest-bootstrap-started" $true',
-    ' if(-not(Test-Path -LiteralPath $InBox -PathType Container)-or -not(Test-Path -LiteralPath $OutBox -PathType Container)){throw "mapped folders unavailable"};Stage "mapped-folders-accessible" $true',
+    ' if(-not(Test-Path -LiteralPath $InBox -PathType Container)-or -not(Test-Path -LiteralPath $OutBox -PathType Container)-or -not(Test-Path -LiteralPath $ResponseBox -PathType Container)){throw "mapped folders unavailable"};Stage "mapped-folders-accessible" $true;Stage "provider-responses-accessible" $true',
     ' $Node=Join-Path $InBox "tools\\node.exe";$Kilo=Join-Path $InBox "tools\\kilo.exe";$Provider=Join-Path $InBox "provider-bridge.js";$Config=Join-Path $InBox "kilo.config.json";$Payload=Join-Path $InBox "payload";$Task=Join-Path $InBox "task.md"',
     ' foreach($p in @($Node,$Kilo,$Provider,$Config,$Payload,$Task)){if(-not(Test-Path -LiteralPath $p)){throw ("staged input missing: "+[IO.Path]::GetFileName($p))}}',
     ' Stage "node-runtime-found" $true;Stage "kilo-launcher-found" $true;Stage "kilo-config-found" $true;Stage "provider-script-found" $true',
     ' if(Test-Path -LiteralPath $WorkDir){Remove-Item -LiteralPath $WorkDir -Recurse -Force};New-Item -ItemType Directory -Path $WorkDir -Force|Out-Null',
     ' foreach($entry in Get-ChildItem -LiteralPath $Payload -Force){Copy-Item -LiteralPath $entry.FullName -Destination $WorkDir -Recurse -Force}',
     ' Copy-Item -LiteralPath $Task -Destination (Join-Path $WorkDir ".kilo-bridge-task.md") -Force;$before=Snapshot $WorkDir',
-    ' $ProviderProcess=Start-Process -FilePath $Node -ArgumentList ((QuoteArg $Provider)+" "+(QuoteArg $OutBox)+" "+34621) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $OutBox "provider.stdout.log") -RedirectStandardError (Join-Path $OutBox "provider.stderr.log")',
+    ' $ProviderProcess=Start-Process -FilePath $Node -ArgumentList ((QuoteArg $Provider)+" "+(QuoteArg $OutBox)+" "+(QuoteArg $ResponseBox)+" "+34621) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $OutBox "provider.stdout.log") -RedirectStandardError (Join-Path $OutBox "provider.stderr.log")',
     ' $healthy=$false;for($i=0;$i -lt 40;$i++){try{$h=Invoke-RestMethod -Uri "http://127.0.0.1:34621/health" -TimeoutSec 2;if($h.status -eq "healthy"){$healthy=$true;break}}catch{Start-Sleep -Milliseconds 250}};if(-not $healthy){throw "guest provider bridge health check failed"}',
     ' Stage "provider-started" $true;Stage "provider-health" $true',
     ' $configObject=Get-Content -LiteralPath $Config -Raw|ConvertFrom-Json;$model="bridge-relay/"+[string]$configObject.metadata.modelId;$agent=[string]$configObject.metadata.agentId;if([string]::IsNullOrWhiteSpace($agent)){throw "agent id missing"}',
@@ -265,7 +267,7 @@ export function buildGuestBootstrap(): string {
   return lines.join("\r\n");
 }
 
-export function buildWsb(inbox: string, outbox: string, bootstrap: string, executionId: string, timeoutMs: number): string {
+export function buildWsb(inbox: string, outbox: string, responses: string, bootstrap: string, executionId: string, timeoutMs: number): string {
   const xml = (value: string): string => value
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -287,7 +289,7 @@ export function buildWsb(inbox: string, outbox: string, bootstrap: string, execu
   const guestBootstrap = path.win32.join(GUEST_INBOX, "bootstrap.ps1");
   const command =
     "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + guestBootstrap + "\" " +
-    "-InBox \"" + GUEST_INBOX + "\" -OutBox \"" + GUEST_OUTBOX + "\" -WorkDir \"" + GUEST_WORK + "\" " +
+    "-InBox \"" + GUEST_INBOX + "\" -OutBox \"" + GUEST_OUTBOX + "\" -ResponseBox \"" + GUEST_PROVIDER_RESPONSES + "\" -WorkDir \"" + GUEST_WORK + "\" " +
     "-ExecutionId \"" + executionId + "\" -TimeoutMs " + String(timeoutMs);
 
   return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Configuration>\n" +
@@ -297,6 +299,7 @@ export function buildWsb(inbox: string, outbox: string, bootstrap: string, execu
     "  <MappedFolders>\n" +
     "    <MappedFolder><HostFolder>" + xml(inbox) + "</HostFolder><SandboxFolder>" + xml(GUEST_INBOX) + "</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>\n" +
     "    <MappedFolder><HostFolder>" + xml(outbox) + "</HostFolder><SandboxFolder>" + xml(GUEST_OUTBOX) + "</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder>\n" +
+    "    <MappedFolder><HostFolder>" + xml(responses) + "</HostFolder><SandboxFolder>" + xml(GUEST_PROVIDER_RESPONSES) + "</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>\n" +
     "  </MappedFolders><LogonCommand><Command>" + xml(command) + "</Command></LogonCommand>\n</Configuration>\n";
 }
 
@@ -305,9 +308,11 @@ class SandboxProviderFileRelay {
   private busy = false;
   private stopped = false;
   private count = 0;
+  private responseBytes = 0;
 
   constructor(
     private readonly outbox: string,
+    private readonly responses: string,
     private readonly baseUrl: URL,
     private readonly apiKey: string,
     private readonly apiKeyHeader: string,
@@ -325,7 +330,7 @@ class SandboxProviderFileRelay {
   }
 
   private append(id: string, record: Record<string, unknown>): void {
-    fs.appendFileSync(path.join(this.outbox, "provider-response-" + id + ".ndjson"), JSON.stringify(record) + "\n", "utf8");
+    fs.appendFileSync(path.join(this.responses, "provider-response-" + id + ".ndjson"), JSON.stringify(record) + "\n", "utf8");
   }
 
   private fail(id: string, message: string): void {
@@ -397,7 +402,11 @@ class SandboxProviderFileRelay {
         const next = await reader.read();
         if (next.done) break;
         total += next.value.byteLength;
-        if (total > MAX_RESPONSE_BYTES) { await reader.cancel().catch(() => undefined); throw new Error("response too large"); }
+        this.responseBytes += next.value.byteLength;
+        if (total > MAX_RESPONSE_BYTES || this.responseBytes > MAX_TOTAL_PROVIDER_RESPONSE_BYTES) {
+          await reader.cancel().catch(() => undefined);
+          throw new Error("provider response limit exceeded");
+        }
         this.append(id, { type: "chunk", data: Buffer.from(next.value).toString("base64") });
       }
       this.append(id, { type: "end" });
@@ -512,6 +521,7 @@ export class WindowsSandboxTaskRunner {
     const runRoot = path.join(this.root, "data", "sandbox-runs", executionId);
     const inbox = path.join(runRoot, "inbox");
     const outbox = path.join(runRoot, "outbox");
+    const responses = path.join(runRoot, "provider-responses");
     const timeoutMs = Math.min(Math.max(opts.timeoutMs ?? this.config.defaultTaskTimeoutMs, 30_000), 6 * 60 * 60 * 1000);
     let relay: SandboxProviderFileRelay | null = null;
     let manifest: GuestManifest | null = null;
@@ -523,6 +533,7 @@ export class WindowsSandboxTaskRunner {
       fs.mkdirSync(path.join(inbox, "tools"), { recursive: true, mode: 0o700 });
       fs.mkdirSync(path.join(inbox, "payload"), { recursive: true, mode: 0o700 });
       fs.mkdirSync(outbox, { recursive: true, mode: 0o700 });
+      fs.mkdirSync(responses, { recursive: true, mode: 0o700 });
       const kiloExe = this.resolveKiloExe();
       if (!kiloExe) throw new Error("standalone kilo.exe unavailable");
       fs.copyFileSync(kiloExe, path.join(inbox, "tools", "kilo.exe"), fs.constants.COPYFILE_EXCL);
@@ -539,7 +550,7 @@ export class WindowsSandboxTaskRunner {
       const keyEnv = this.config.sandboxProviderApiKeyEnv;
       const apiKey = keyEnv ? process.env[keyEnv] ?? "" : "";
       relay = new SandboxProviderFileRelay(
-        outbox, provider.data, apiKey,
+        outbox, responses, provider.data, apiKey,
         this.config.sandboxProviderApiKeyHeader,
         this.config.sandboxProviderApiKeyPrefix,
         this.config.sandboxProviderModelId
@@ -564,7 +575,7 @@ export class WindowsSandboxTaskRunner {
       const bootstrap = path.join(inbox, "bootstrap.ps1");
       fs.writeFileSync(bootstrap, buildGuestBootstrap(), { encoding: "utf8", flag: "wx" });
       const wsb = path.join(runRoot, "execution.wsb");
-      fs.writeFileSync(wsb, buildWsb(inbox, outbox, bootstrap, executionId, timeoutMs), { encoding: "utf8", flag: "wx" });
+      fs.writeFileSync(wsb, buildWsb(inbox, outbox, responses, bootstrap, executionId, timeoutMs), { encoding: "utf8", flag: "wx" });
 
       const launchStartedAt = Date.now();
       relay.start();
