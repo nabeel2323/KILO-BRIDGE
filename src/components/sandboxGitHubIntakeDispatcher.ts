@@ -32,15 +32,28 @@ export class SandboxGitHubIntakeDispatcher implements GitHubIntakeDispatcher {
   isReady(): boolean {
     try {
       const config = ensureBridgeConfig(this.options.bridgeRoot);
+      if (config.githubIntakeEnabled !== true) return false;
+      return this.isPrerequisitesReady(config);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Checks the isolated runtime and integration prerequisites without requiring
+   * the dedicated intake gate itself to be enabled. The Control Center uses
+   * this to display whether the second-stage intake activation is available.
+   */
+  isPrerequisitesReady(configOverride?: BridgeConfig): boolean {
+    try {
+      const config = configOverride ?? ensureBridgeConfig(this.options.bridgeRoot);
       if (
-        config.githubIntakeEnabled !== true ||
         config.sandboxExecutionEnabled !== true ||
         config.ghEnabled !== true ||
         config.kiloEnabled !== true ||
         config.githubIntakeAllowedRepositories.length === 0
       ) return false;
       if (!this.options.isRuntimeAttested()) return false;
-
       return new WindowsSandboxTaskRunner({
         bridgeRoot: this.options.bridgeRoot,
         config,
