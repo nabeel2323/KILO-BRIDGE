@@ -393,7 +393,7 @@ class SandboxProviderFileRelay {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
     try {
-      const response = await fetch(target, { method: "POST", headers, body, signal: controller.signal });
+      const response = await fetch(target, { method: "POST", headers, body, signal: controller.signal, redirect: "error" });
       this.append(id, { type: "headers", statusCode: response.status, contentType: response.headers.get("content-type") ?? "application/json" });
       if (!response.body) { this.append(id, { type: "end" }); return; }
       const reader = response.body.getReader();
@@ -424,7 +424,7 @@ export function validateSandboxTaskManifest(value: unknown, executionId: string)
   if (manifest.executionId !== executionId) errors.push("execution id mismatch");
   if (manifest.finalStatus !== "COMPLETED") errors.push("guest final status is not COMPLETED");
   if (manifest.kiloExitCode !== 0) errors.push("Kilo exit code is not zero");
-  const required = ["guest-bootstrap-started","mapped-folders-accessible","node-runtime-found","kilo-launcher-found","kilo-config-found","provider-script-found","provider-started","provider-health","kilo-started","kilo-completed","result-file-written"];
+  const required = ["guest-bootstrap-started","mapped-folders-accessible","provider-responses-accessible","node-runtime-found","kilo-launcher-found","kilo-config-found","provider-script-found","provider-started","provider-health","kilo-started","kilo-completed","result-file-written"];
   if (!Array.isArray(manifest.stages) || manifest.stages.length > 100) errors.push("guest stages missing or exceed the allowed count");
   else for (const stage of required) if (!manifest.stages.some((item) => item?.stage === stage && item.ok === true)) errors.push("required guest stage missing: " + stage);
   if (!Array.isArray(manifest.toolEvidence) || !manifest.toolEvidence.length ||
