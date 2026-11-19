@@ -43,12 +43,29 @@ interface LoginWindow {
   blockedUntil: number;
 }
 
+export interface IntakeControlState {
+  enabled: boolean;
+  running: boolean;
+  dispatcherReady: boolean;
+  repositories: string[];
+  reason: string | null;
+}
+
+export interface IntakeControlActionResult {
+  ok: boolean;
+  error?: string;
+  code?: string;
+}
+
 export interface ControlCenterOptions {
   bridgeRoot: string;
   store: SqliteStore;
   registry: ProjectRegistry;
   host?: string;
   port?: number;
+  intakeStatus?: () => IntakeControlState;
+  intakeStart?: () => Promise<IntakeControlActionResult>;
+  intakeStop?: () => IntakeControlActionResult;
 }
 
 export interface ControlCenterStartResult {
@@ -187,6 +204,9 @@ export class ControlCenterServer {
   private readonly host: string;
   private port: number;
   private readonly authPath: string;
+  private readonly intakeStatusCallback?: ControlCenterOptions["intakeStatus"];
+  private readonly intakeStartCallback?: ControlCenterOptions["intakeStart"];
+  private readonly intakeStopCallback?: ControlCenterOptions["intakeStop"];
   private server: Server | null = null;
   private readonly sessions = new Map<string, OperatorSession>();
   private readonly loginWindows = new Map<string, LoginWindow>();
@@ -202,6 +222,9 @@ export class ControlCenterServer {
     this.host = options.host ?? LOOPBACK_HOST;
     this.port = options.port ?? DEFAULT_PORT;
     this.authPath = authFilePath(this.bridgeRoot);
+    this.intakeStatusCallback = options.intakeStatus;
+    this.intakeStartCallback = options.intakeStart;
+    this.intakeStopCallback = options.intakeStop;
     if (this.host !== LOOPBACK_HOST) {
       throw new Error("Control Center must bind to 127.0.0.1; non-loopback binding is prohibited.");
     }
@@ -250,6 +273,7 @@ export class ControlCenterServer {
   }
 
   async close(): Promise<void> {
+    try { this.intakeStopCallback?.(); } catch { /* best effort service shutdown */ }
     this.sessions.clear();
     if (this.eventTimer) clearInterval(this.eventTimer);
     this.eventTimer = null;
@@ -488,6 +512,42 @@ export class ControlCenterServer {
       this.sendJson(response, 200, detail);
       return;
     }
+    if (route === "/api/intake/status" && method === "GET") {
+      this.sendJson(response, 200, this.intakeStatusReadModel());
+      return;
+    }
+    if (route === "/api/intake/start" && method === "POST") {
+      if (!this.intakeStartCallback) {
+        this.sendJson(response, 503, { error: "GitHub intake controls are not connected to the Bridge app." });
+        return;
+      }
+      const outcome = await this.intakeStartCallback();
+      if (!outcome.ok) {
+        this.sendJson(response, 409, {
+          error: sanitizedText(outcome.error ?? "GitHub intake could not be started.", 300),
+          code: outcome.code ?? "INTAKE_START_BLOCKED",
+          status: this.intakeStatusReadModel(),
+        });
+        return;
+      }
+      this.store.insertAudit({ actor: "local-operator", action: "control_center.github_intake_started" });
+      this.sendJson(response, 200, { ok: true, status: this.intakeStatusReadModel() });
+      return;
+    }
+    if (route === "/api/intake/stop" && method === "POST") {
+      if (!this.intakeStopCallback) {
+        this.sendJson(response, 503, { error: "GitHub intake controls are not connected to the Bridge app." });
+        return;
+      }
+      const outcome = this.intakeStopCallback();
+      if (!outcome.ok) {
+        this.sendJson(response, 409, { error: sanitizedText(outcome.error ?? "GitHub intake could not be stopped.", 300) });
+        return;
+      }
+      this.store.insertAudit({ actor: "local-operator", action: "control_center.github_intake_stopped" });
+      this.sendJson(response, 200, { ok: true, status: this.intakeStatusReadModel() });
+      return;
+    }
     if (route === "/api/intake-claims" && method === "GET") {
       this.sendJson(response, 200, { claims: this.claimReadModel() });
       return;
@@ -709,6 +769,28 @@ export class ControlCenterServer {
     this.sendJson(response, 200, { ok: true, csrfToken: session.csrfToken });
   }
 
+  private intakeStatusReadModel(): IntakeControlState {
+    try {
+      if (this.intakeStatusCallback) return this.intakeStatusCallback();
+      const config = ensureBridgeConfig(this.bridgeRoot);
+      return {
+        enabled: config.githubIntakeEnabled,
+        running: false,
+        dispatcherReady: false,
+        repositories: [...config.githubIntakeAllowedRepositories],
+        reason: "GitHub intake lifecycle callbacks are not connected to the Bridge app.",
+      };
+    } catch {
+      return {
+        enabled: false,
+        running: false,
+        dispatcherReady: false,
+        repositories: [],
+        reason: "Bridge intake status could not be read.",
+      };
+    }
+  }
+
   private settingsReadModel(): Record<string, unknown> {
     const config = ensureBridgeConfig(this.bridgeRoot);
     const worker = this.workerReadModel();
@@ -716,12 +798,13 @@ export class ControlCenterServer {
       gates: {
         workerEnabled: config.workerEnabled,
         githubIntakeEnabled: config.githubIntakeEnabled,
+        sandboxExecutionEnabled: config.sandboxExecutionEnabled,
         githubIntakeAllowedRepositories: config.githubIntakeAllowedRepositories,
       },
       pollIntervalMs: config.pollIntervalMs,
       workerRunning: worker.running,
-      intakeRuntimeAvailable: false,
-      intakeRuntimeReason: "The dedicated intake service is not connected to a production-isolated task dispatcher yet.",
+      intakeRuntimeAvailable: this.intakeStatusReadModel().dispatcherReady,
+      intakeRuntimeReason: this.intakeStatusReadModel().reason,
     };
   }
 
@@ -817,6 +900,7 @@ export class ControlCenterServer {
     const claims = this.claimReadModel();
     const activeExecutions = this.store.countExecutionsByStatus("RUNNING");
     const worker = this.workerReadModel();
+    const intake = this.intakeStatusReadModel();
     return {
       generatedAt: new Date().toISOString(),
       gates: {
@@ -826,9 +910,11 @@ export class ControlCenterServer {
       services: {
         worker: worker,
         intake: {
-          available: false,
-          running: false,
-          reason: "The dedicated intake service is not connected to a production-isolated task dispatcher yet.",
+          available: intake.dispatcherReady,
+          enabled: intake.enabled,
+          running: intake.running,
+          reason: intake.reason,
+          repositories: intake.repositories,
         },
       },
       counts: {
