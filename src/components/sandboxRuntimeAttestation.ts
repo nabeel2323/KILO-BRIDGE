@@ -412,7 +412,7 @@ export class SandboxRuntimeAttestationService {
     }
 
     const providerCredentialBinding = crypto.createHmac("sha256", key)
-      .update("kilo-bridge-provider-credential-binding:v1\\0", "utf8")
+      .update("kilo-bridge-provider-credential-binding:v1:", "utf8")
       .update(providerCredential, "utf8")
       .digest("hex");
     const { fingerprint: _baseFingerprint, ...runtimeFields } = identity;
