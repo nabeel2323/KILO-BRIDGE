@@ -541,7 +541,7 @@ test("control center: intake status fails closed when lifecycle callbacks are no
 
 test("control center: runtime attestation endpoint is session and CSRF protected", async () => {
   let verificationStarts = 0;
-  let status = {
+  let status: any = {
     state: "NOT_ATTESTED",
     valid: false,
     reason: "No successful Sandbox runtime attestation has been recorded.",
