@@ -382,7 +382,13 @@ test("Sandbox attestation: a persistent execution gate changed during the guest 
       store: env.store,
       identity: () => makeIdentity(),
       mutateConfigDuringRun: (root) => {
-        updateBridgeConfig(root, (current) => ({ ...current, sandboxExecutionEnabled: true }));
+        // Simulate an out-of-band manual edit that bypasses the shared config lock.
+        const current = ensureBridgeConfig(root);
+        fs.writeFileSync(
+          path.join(root, "bridge.config.json"),
+          JSON.stringify({ ...current, sandboxExecutionEnabled: true }, null, 2),
+          "utf8"
+        );
       },
     });
     assert.equal(service.startVerification().ok, true);
