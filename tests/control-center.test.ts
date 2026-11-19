@@ -721,3 +721,27 @@ test("control center: activation requires valid attestation and proceeds Sandbox
     await env.cleanup();
   }
 });
+
+
+test("control center: settings read model strips provider URL credentials query values and fragments", async () => {
+  const env = await setupAuthenticatedServer();
+  try {
+    updateBridgeConfig(env.root, (current) => ({
+      ...current,
+      sandboxProviderBaseUrl: "https://operator:embedded-secret@provider.example/v1?token=query-secret#private-fragment",
+    }));
+    const response = await fetch(env.baseUrl + "api/settings", {
+      headers: { Cookie: env.cookie },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as any;
+    assert.equal(body.sandbox.providerBaseUrl, "https://provider.example/v1");
+    const serialized = JSON.stringify(body);
+    assert.equal(serialized.includes("operator"), false);
+    assert.equal(serialized.includes("embedded-secret"), false);
+    assert.equal(serialized.includes("query-secret"), false);
+    assert.equal(serialized.includes("private-fragment"), false);
+  } finally {
+    await env.cleanup();
+  }
+});
