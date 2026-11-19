@@ -430,10 +430,6 @@ export class SandboxRuntimeAttestationService {
       runnerEvidencePath = path.resolve(result.evidencePath);
       evidenceHash = sha256(fs.readFileSync(runnerEvidencePath));
 
-      const identityAfter = runner.runtimeIdentity();
-      if (identityAfter.fingerprint !== identityBefore.fingerprint) {
-        throw new Error("A runtime component changed during the verification; attestation is not valid");
-      }
     } finally {
       if (createdVerificationRoot) {
         try {
@@ -457,6 +453,23 @@ export class SandboxRuntimeAttestationService {
     if (!runnerEvidencePath || !isRegularFile(runnerEvidencePath) ||
         sha256(fs.readFileSync(runnerEvidencePath)) !== evidenceHash) {
       throw new Error("Sandbox operational evidence disappeared or changed during workspace cleanup");
+    }
+
+    // Re-read the persisted configuration after the guest has been cleaned up.
+    // A settings change during the run must never result in an attestation for
+    // the stale in-memory runner configuration.
+    const configAfter = this.getConfig();
+    if (configAfter.workerEnabled || configAfter.githubIntakeEnabled || configAfter.sandboxExecutionEnabled) {
+      throw new Error("An autonomous execution gate changed while runtime verification was running");
+    }
+    const finalRunner = this.runnerFactory(this.temporaryRunnerConfig(configAfter));
+    const finalReadiness = finalRunner.readiness();
+    if (!finalReadiness.ready) {
+      throw new Error("Sandbox readiness changed during verification: " + finalReadiness.reasons.slice(0, 5).join("; "));
+    }
+    const identityAfter = finalRunner.runtimeIdentity();
+    if (identityAfter.fingerprint !== identityBefore.fingerprint) {
+      throw new Error("A runtime-bound executable or provider setting changed during verification; attestation is not valid");
     }
 
     const attestedAt = new Date().toISOString();
