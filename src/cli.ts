@@ -340,6 +340,7 @@ async function main(argv: string[]): Promise<number> {
             intakeStatus: () => app.githubIntakeStatus(),
             intakeStart: () => app.githubIntakeStartContinuous(),
             intakeStop: () => app.githubIntakeStop(),
+            sandboxAttestation: app.sandboxRuntimeAttestation(),
           });
           const started = await controlCenter.start();
           print("Kilo Bridge Control Center is running.");
