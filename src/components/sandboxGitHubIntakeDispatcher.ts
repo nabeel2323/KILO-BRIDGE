@@ -26,6 +26,7 @@ export class SandboxGitHubIntakeDispatcher implements GitHubIntakeDispatcher {
     store: SqliteStore;
     registry: ProjectRegistry;
     logger: Logger;
+    isRuntimeAttested: () => boolean;
   }) {}
 
   isReady(): boolean {
@@ -38,6 +39,7 @@ export class SandboxGitHubIntakeDispatcher implements GitHubIntakeDispatcher {
         config.kiloEnabled !== true ||
         config.githubIntakeAllowedRepositories.length === 0
       ) return false;
+      if (!this.options.isRuntimeAttested()) return false;
 
       return new WindowsSandboxTaskRunner({
         bridgeRoot: this.options.bridgeRoot,
