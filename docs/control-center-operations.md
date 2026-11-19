@@ -150,9 +150,11 @@ Stop prevents new polling ticks; it does not forcibly terminate an execution alr
 
 ## Current verification
 
-Windows CI run 44431059408, commit d654e5f18c6e99ce136c613da727915cb21b7b17, passed dependency installation, source/test TypeScript checking, build, and the full test suite: **295 tests, 290 passed, 0 failed, 5 skipped**. This run predates the signed-attestation, staged-gate, and current regression-test commits; the latest branch tip still requires its own CI result.
+Windows CI run [44436858231](https://github.com/nabeel2323/KILO-BRIDGE/actions/runs/44436858231) on source commit `b652fdeb13e220776add26a0a6225300da7bae87` passed dependency installation, source/test TypeScript checking, build, and the complete suite: **307 tests, 302 passed, 0 failed, 5 skipped**. It includes the version-2 HMAC provider-credential binding and provider-key rotation regression.
 
-This result is code-level CI evidence only. It does not demonstrate that the generalized runner completed a real task inside the operator's Windows Sandbox guest or that the browser has been visually accepted on the operator's machine.
+The tracker-inclusive follow-up run [44437249678](https://github.com/nabeel2323/KILO-BRIDGE/actions/runs/44437249678) on commit `ec93d0954e4daef94a69e7f3742afa4638814921` also passed dependency installation, TypeScript, build, and all tests with the same totals. A later progress-tracker-only commit reconciled the documentation status; it did not alter runtime source.
+
+These are code-level CI results only. They do not demonstrate that the generalized runner completed a real task inside the operator's Windows Sandbox guest or that the local browser interface has been accepted on the operator's machine.
 
 ## Troubleshooting
 
