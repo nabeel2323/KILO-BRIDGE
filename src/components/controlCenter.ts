@@ -14,6 +14,10 @@ import { BridgeConfigSchema, ensureBridgeConfig, updateBridgeConfig } from "../c
 import type { SqliteStore } from "../db";
 import type { ProjectRegistry } from "./registry";
 import { CONTROL_CENTER_HTML } from "./controlCenterPage";
+import {
+  SandboxRuntimeAttestationService,
+  type SandboxAttestationStatus,
+} from "./sandboxRuntimeAttestation";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4190;
@@ -66,6 +70,10 @@ export interface ControlCenterOptions {
   intakeStatus?: () => IntakeControlState;
   intakeStart?: () => Promise<IntakeControlActionResult>;
   intakeStop?: () => IntakeControlActionResult;
+  sandboxAttestation?: {
+    status(): SandboxAttestationStatus;
+    startVerification(): { ok: boolean; code?: string; error?: string; status: SandboxAttestationStatus };
+  };
 }
 
 export interface ControlCenterStartResult {
@@ -207,6 +215,7 @@ export class ControlCenterServer {
   private readonly intakeStatusCallback?: ControlCenterOptions["intakeStatus"];
   private readonly intakeStartCallback?: ControlCenterOptions["intakeStart"];
   private readonly intakeStopCallback?: ControlCenterOptions["intakeStop"];
+  private readonly sandboxAttestation: NonNullable<ControlCenterOptions["sandboxAttestation"]>;
   private server: Server | null = null;
   private readonly sessions = new Map<string, OperatorSession>();
   private readonly loginWindows = new Map<string, LoginWindow>();
@@ -225,6 +234,13 @@ export class ControlCenterServer {
     this.intakeStatusCallback = options.intakeStatus;
     this.intakeStartCallback = options.intakeStart;
     this.intakeStopCallback = options.intakeStop;
+    this.sandboxAttestation = options.sandboxAttestation ??
+      new SandboxRuntimeAttestationService({
+        bridgeRoot: this.bridgeRoot,
+        store: this.store,
+        getConfig: () => ensureBridgeConfig(this.bridgeRoot),
+        isIntakeRunning: () => this.intakeStatusReadModel().running,
+      });
     if (this.host !== LOOPBACK_HOST) {
       throw new Error("Control Center must bind to 127.0.0.1; non-loopback binding is prohibited.");
     }
@@ -510,6 +526,28 @@ export class ControlCenterServer {
         return;
       }
       this.sendJson(response, 200, detail);
+      return;
+    }
+    if (route === "/api/sandbox/attestation" && method === "GET") {
+      this.sendJson(response, 200, this.sandboxAttestation.status());
+      return;
+    }
+    if (route === "/api/sandbox/attestation/verify" && method === "POST") {
+      const outcome = this.sandboxAttestation.startVerification();
+      if (!outcome.ok) {
+        this.sendJson(response, 409, {
+          error: sanitizedText(outcome.error ?? "Sandbox runtime verification could not be started.", 300),
+          code: outcome.code ?? "SANDBOX_ATTESTATION_BLOCKED",
+          status: outcome.status,
+        });
+        return;
+      }
+      this.store.insertAudit({
+        actor: "local-operator",
+        action: "control_center.sandbox_runtime_verification_started",
+        detail: JSON.stringify({ state: outcome.status.state, startedAt: outcome.status.startedAt }),
+      });
+      this.sendJson(response, 202, { ok: true, status: outcome.status });
       return;
     }
     if (route === "/api/intake/status" && method === "GET") {
@@ -824,6 +862,7 @@ export class ControlCenterServer {
         providerApiKeyHeader: config.sandboxProviderApiKeyHeader,
         providerApiKeyPrefix: config.sandboxProviderApiKeyPrefix,
       },
+      runtimeAttestation: this.sandboxAttestation.status(),
     };
   }
 
@@ -852,19 +891,66 @@ export class ControlCenterServer {
       return;
     }
 
-    // The Control Center can prepare prerequisites and disable executors, but
-    // it cannot authorize a new autonomous execution path. Activation remains
-    // blocked until a real Sandbox guest acceptance has been independently
-    // completed and recorded by the operator release procedure.
-    if (
-      body.githubIntakeEnabled === true ||
-      body.workerEnabled === true ||
-      body.sandboxExecutionEnabled === true
-    ) {
+    // The generic worker remains permanently outside this dedicated intake
+    // authorization flow. Sandbox execution requires a current signed runtime
+    // attestation. Dedicated intake is a second, explicit gate after Sandbox
+    // has already been enabled and its current dispatcher prerequisites pass.
+    if (body.workerEnabled === true) {
       this.sendJson(response, 409, {
-        error: "Execution gates cannot be enabled from the Control Center until the real Windows Sandbox runtime acceptance is complete.",
+        error: "The legacy generic worker cannot be enabled from the dedicated Control Center workflow.",
       });
       return;
+    }
+    if (body.sandboxExecutionEnabled === true || body.githubIntakeEnabled === true) {
+      const attestation = this.sandboxAttestation.status();
+      if (!attestation.valid) {
+        this.sendJson(response, 409, {
+          error: attestation.reason ?? "A current Windows Sandbox runtime attestation is required.",
+          code: "SANDBOX_ATTESTATION_REQUIRED",
+          status: attestation,
+        });
+        return;
+      }
+      if (body.githubIntakeEnabled === true) {
+        const current = ensureBridgeConfig(this.bridgeRoot);
+        if (body.sandboxExecutionEnabled === true || !current.sandboxExecutionEnabled) {
+          this.sendJson(response, 409, {
+            error: "Enable Windows Sandbox execution first; dedicated GitHub intake is a separate second gate.",
+            code: "SANDBOX_GATE_MUST_ALREADY_BE_ENABLED",
+          });
+          return;
+        }
+        const prerequisites = {
+          ghEnabled: body.ghEnabled === true || current.ghEnabled,
+          kiloEnabled: body.kiloEnabled === true || current.kiloEnabled,
+        };
+        if (!prerequisites.ghEnabled || !prerequisites.kiloEnabled ||
+            current.githubIntakeAllowedRepositories.length === 0) {
+          this.sendJson(response, 409, {
+            error: "GitHub and Kilo prerequisites must be enabled and at least one trusted repository must be configured before intake activation.",
+            code: "INTAKE_PREREQUISITES_INCOMPLETE",
+          });
+          return;
+        }
+        const intake = this.intakeStatusReadModel();
+        if (!intake.dispatcherReady) {
+          this.sendJson(response, 409, {
+            error: intake.reason ?? "The claim-bound Sandbox dispatcher is not ready.",
+            code: "INTAKE_DISPATCHER_NOT_READY",
+          });
+          return;
+        }
+      }
+    }
+    if (body.sandboxExecutionEnabled === false && !("githubIntakeEnabled" in body)) {
+      const current = ensureBridgeConfig(this.bridgeRoot);
+      if (current.githubIntakeEnabled) {
+        this.sendJson(response, 409, {
+          error: "Disable dedicated GitHub intake before disabling the Sandbox execution gate.",
+          code: "INTAKE_GATE_MUST_BE_DISABLED_FIRST",
+        });
+        return;
+      }
     }
 
     for (const key of ["githubIntakeEnabled", "workerEnabled", "sandboxExecutionEnabled", "ghEnabled", "kiloEnabled"]) {
