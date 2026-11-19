@@ -622,9 +622,12 @@ export class WindowsSandboxTaskRunner {
     let manifest: GuestManifest | null = null;
     let providerCount = 0;
     let evidencePath: string | undefined;
+    let createdRunRoot = false;
     try {
       fs.mkdirSync(path.dirname(runRoot), { recursive: true });
       if (fs.existsSync(runRoot)) throw new Error("Sandbox execution directory already exists");
+      fs.mkdirSync(runRoot, { recursive: false, mode: 0o700 });
+      createdRunRoot = true;
       fs.mkdirSync(path.join(inbox, "tools"), { recursive: true, mode: 0o700 });
       fs.mkdirSync(path.join(inbox, "payload"), { recursive: true, mode: 0o700 });
       fs.mkdirSync(outbox, { recursive: true, mode: 0o700 });
@@ -739,10 +742,13 @@ export class WindowsSandboxTaskRunner {
       });
     } finally {
       if (relay) await relay.stop().catch(() => undefined);
-      try {
-        if (fs.existsSync(runRoot)) fs.rmSync(runRoot, { recursive: true, force: true });
-      } catch {
-        cleanup = "failed";
+      if (createdRunRoot) {
+        try {
+          if (fs.existsSync(runRoot)) fs.rmSync(runRoot, { recursive: true, force: true });
+          if (fs.existsSync(runRoot)) cleanup = "failed";
+        } catch {
+          cleanup = "failed";
+        }
       }
       if (finalResult[0]) finalResult[0].cleanup = cleanup;
     }
