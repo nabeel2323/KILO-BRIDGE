@@ -13,6 +13,26 @@ The runner requires:
 - Windows with the Windows Sandbox feature enabled.
 - An interactive desktop session (the readiness check looks for the Windows Explorer session).
 - A configured standalone kilo.exe executable. It must be an existing absolute-path regular file; a .cmd shim is not accepted.
+
+### Verify the standalone executable path
+
+The Bridge uses the binary directly inside the guest; it does not copy an npm command shim into the Sandbox.
+
+```powershell
+$kiloCommand = Get-Command kilo -ErrorAction Stop
+$kiloCommand | Format-List Name,CommandType,Source,Path,Definition
+where.exe kilo
+kilo --version
+
+$kiloPath = $kiloCommand.Source
+if (-not $kiloPath -or [System.IO.Path]::GetExtension($kiloPath) -ine ".exe") {
+    throw "The resolved kilo command is not a standalone .exe."
+}
+& $kiloPath --version
+Get-FileHash -LiteralPath $kiloPath -Algorithm SHA256
+```
+
+If `Get-Command` resolves to `kilo.cmd`, use the standalone Windows CLI archive linked from the [official Kilo CLI documentation](https://kilo.ai/docs/code-with-ai/platforms/cli) and [Kilo releases](https://github.com/Kilo-Org/kilocode/releases). Extract `kilo.exe` to a dedicated tools directory outside the repository, verify `kilo.exe --version`, then enter its full path in Control Center Settings. Never store the executable in the Bridge repository or task worktree.
 - A provider base URL using HTTPS, or HTTP only for 127.0.0.1 / localhost.
 - A provider model ID and, when authentication is required, an environment variable containing the API key in the Bridge process.
 - sandboxExecutionEnabled=true for actual execution.
