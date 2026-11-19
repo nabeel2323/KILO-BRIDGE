@@ -185,6 +185,14 @@ export class SandboxRuntimeAttestationService {
     }
     const stored = this.readSignedAttestation();
     if (!stored.ok) {
+      if (stored.missing && this.runState?.state === "FAILED") {
+        return {
+          state: "FAILED",
+          valid: false,
+          reason: this.runState.reason ?? "The most recent Sandbox runtime verification failed.",
+          startedAt: this.runState.startedAt,
+        };
+      }
       return {
         state: stored.missing ? "NOT_ATTESTED" : "NEEDS_RETEST",
         valid: false,
@@ -299,34 +307,37 @@ export class SandboxRuntimeAttestationService {
     const verificationRoot = path.join(this.dataRoot, "sandbox-runtime-verification");
     const runRoot = path.join(verificationRoot, executionId);
     const worktree = path.join(runRoot, "workspace");
-    fs.mkdirSync(verificationRoot, { recursive: true });
-    if (fs.existsSync(runRoot)) throw new Error("Sandbox verification directory already exists");
-    fs.mkdirSync(worktree, { recursive: true, mode: 0o700 });
-
-    const nonce = crypto.randomBytes(24).toString("base64url");
-    const markerContents = [
-      "KILO BRIDGE WINDOWS SANDBOX RUNTIME ATTESTATION",
-      "executionId=" + executionId,
-      "nonce=" + nonce,
-      "",
-    ].join("\n");
-    const taskBody = [
-      "This is a one-time runtime attestation task in a disposable empty workspace owned by Kilo Bridge.",
-      "Use Kilo's native write tool (not bash, shell, terminal, or an external process) to create exactly one file at the workspace root:",
-      MARKER_NAME,
-      "The file contents must match these lines exactly, including the execution identifier and nonce:",
-      "KILO BRIDGE WINDOWS SANDBOX RUNTIME ATTESTATION",
-      "executionId=" + executionId,
-      "nonce=" + nonce,
-      "Do not create or modify any other files. Do not use bash. Do not access a repository, network endpoint, path outside the workspace, credential, or environment variable.",
-      "This is verification only. Do not commit, push, merge, publish, deploy, migrate, or contact GitHub.",
-    ].join("\n");
-
-    let result: SandboxTaskRunResult | null = null;
     let cleanupOk = false;
+    let result: SandboxTaskRunResult | null = null;
     let evidenceHash = "";
     let markerHash = "";
+    let markerContents = "";
+    let runnerEvidencePath: string | null = null;
+
     try {
+      fs.mkdirSync(verificationRoot, { recursive: true });
+      if (fs.existsSync(runRoot)) throw new Error("Sandbox verification directory already exists");
+      fs.mkdirSync(worktree, { recursive: true, mode: 0o700 });
+
+      const nonce = crypto.randomBytes(24).toString("base64url");
+      markerContents = [
+        "KILO BRIDGE WINDOWS SANDBOX RUNTIME ATTESTATION",
+        "executionId=" + executionId,
+        "nonce=" + nonce,
+        "",
+      ].join("\n");
+      const taskBody = [
+        "This is a one-time runtime attestation task in a disposable empty workspace owned by Kilo Bridge.",
+        "Use Kilo's native write tool (not bash, shell, terminal, or an external process) to create exactly one file at the workspace root:",
+        MARKER_NAME,
+        "The file contents must match these lines exactly, including the execution identifier and nonce:",
+        "KILO BRIDGE WINDOWS SANDBOX RUNTIME ATTESTATION",
+        "executionId=" + executionId,
+        "nonce=" + nonce,
+        "Do not create or modify any other files. Do not use bash. Do not access a repository, network endpoint, path outside the workspace, credential, or environment variable.",
+        "This is verification only. Do not commit, push, merge, publish, deploy, migrate, or contact GitHub.",
+      ].join("\n");
+
       result = await runner.run(
         {
           id: "sandbox-runtime-verification-" + executionId,
@@ -370,11 +381,13 @@ export class SandboxRuntimeAttestationService {
       if (!result.evidencePath || !isRegularFile(result.evidencePath)) {
         throw new Error("The runner's bounded operational evidence file is missing");
       }
-      const evidenceRelative = path.relative(path.join(this.dataRoot, "sandbox-evidence"), result.evidencePath);
-      if (evidenceRelative.startsWith("..") || path.isAbsolute(evidenceRelative)) {
+      const evidenceDirectory = path.resolve(this.dataRoot, "sandbox-evidence");
+      const evidenceRelative = path.relative(evidenceDirectory, path.resolve(result.evidencePath));
+      if (evidenceRelative === "" || evidenceRelative.startsWith("..") || path.isAbsolute(evidenceRelative)) {
         throw new Error("The runner evidence file is outside the Bridge evidence directory");
       }
-      evidenceHash = sha256(fs.readFileSync(result.evidencePath));
+      runnerEvidencePath = path.resolve(result.evidencePath);
+      evidenceHash = sha256(fs.readFileSync(runnerEvidencePath));
 
       const identityAfter = runner.runtimeIdentity();
       if (identityAfter.fingerprint !== identityBefore.fingerprint) {
@@ -388,8 +401,18 @@ export class SandboxRuntimeAttestationService {
         cleanupOk = false;
       }
     }
+
+    const runnerRunRoot = path.join(this.dataRoot, "sandbox-runs", executionId);
+    if (fs.existsSync(runnerRunRoot)) {
+      try { fs.rmSync(runnerRunRoot, { recursive: true, force: true }); } catch { /* runner cleanup is independently checked below */ }
+    }
     if (!cleanupOk) throw new Error("Disposable Sandbox verification workspace cleanup failed");
+    if (fs.existsSync(runnerRunRoot)) throw new Error("Sandbox runner staging directory cleanup failed");
     if (!result || result.cleanup !== "complete") throw new Error("Sandbox execution cleanup was not confirmed");
+    if (!runnerEvidencePath || !isRegularFile(runnerEvidencePath) ||
+        sha256(fs.readFileSync(runnerEvidencePath)) !== evidenceHash) {
+      throw new Error("Sandbox operational evidence disappeared or changed during workspace cleanup");
+    }
 
     const attestedAt = new Date().toISOString();
     const expiresAt = new Date(Date.now() + ATTESTATION_TTL_MS).toISOString();
