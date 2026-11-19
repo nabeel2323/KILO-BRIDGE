@@ -44,7 +44,7 @@ export interface GitHubIntakeOptions {
   bridgeRoot: string;
   config: Pick<BridgeConfig,
     "githubIntakeEnabled" | "githubIntakeAllowedRepositories" |
-    "ghEnabled" | "kiloEnabled" | "workerEnabled" | "defaultTaskTimeoutMs"
+    "sandboxExecutionEnabled" | "ghEnabled" | "kiloEnabled" | "workerEnabled" | "defaultTaskTimeoutMs"
   >;
   /** Optional live configuration reader. Production wiring uses this so a CLI gate-off is observed by the running poll loop. */
   getConfig?: () => GitHubIntakeOptions["config"];
@@ -157,6 +157,9 @@ export class GitHubIntakeService {
     }
     if (config.githubIntakeEnabled !== true) {
       return failResult("dedicated GitHub intake is disabled", "GITHUB_INTAKE_DISABLED");
+    }
+    if (config.sandboxExecutionEnabled !== true) {
+      return failResult("Windows Sandbox execution is disabled", "SANDBOX_EXECUTION_DISABLED");
     }
     if (config.ghEnabled !== true || config.kiloEnabled !== true) {
       return failResult("GitHub and Kilo prerequisites must both be enabled before intake", "INTAKE_PREREQUISITES_DISABLED");
@@ -380,6 +383,9 @@ export class GitHubIntakeService {
     if (config.githubIntakeEnabled !== true) {
       return failResult("dedicated GitHub intake is disabled", "GITHUB_INTAKE_DISABLED");
     }
+    if (config.sandboxExecutionEnabled !== true) {
+      return failResult("Windows Sandbox execution is disabled", "SANDBOX_EXECUTION_DISABLED");
+    }
     if (config.ghEnabled !== true || config.kiloEnabled !== true) {
       return failResult("GitHub and Kilo prerequisites must both be enabled before intake", "INTAKE_PREREQUISITES_DISABLED");
     }
@@ -402,12 +408,14 @@ export class GitHubIntakeService {
       }
       if (
         current.githubIntakeEnabled !== true ||
+        current.sandboxExecutionEnabled !== true ||
         current.ghEnabled !== true ||
         current.kiloEnabled !== true ||
         current.githubIntakeAllowedRepositories.length === 0
       ) {
         this.audit(null, "github_intake.stopped_by_config_gate", {
           githubIntakeEnabled: current.githubIntakeEnabled,
+          sandboxExecutionEnabled: current.sandboxExecutionEnabled,
           ghEnabled: current.ghEnabled,
           kiloEnabled: current.kiloEnabled,
           trustedRepositories: current.githubIntakeAllowedRepositories.length,
