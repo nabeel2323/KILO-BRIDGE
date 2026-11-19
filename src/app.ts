@@ -938,7 +938,7 @@ export class KiloBridgeApp {
       logger: this.ctx.logger,
       isRuntimeAttested: () => this.sandboxRuntimeAttestation().status().valid,
     });
-    const dispatcherReady = dispatcher.isReady();
+    const dispatcherReady = dispatcher.isPrerequisitesReady();
     let reason: string | null = null;
     if (!config.githubIntakeEnabled) reason = "githubIntakeEnabled is false";
     else if (!config.sandboxExecutionEnabled) reason = "sandboxExecutionEnabled is false";
