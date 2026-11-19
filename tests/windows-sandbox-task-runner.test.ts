@@ -166,11 +166,11 @@ test("sandbox runner: WSB logon command uses the guest-mapped bootstrap path and
     /-File &quot;C:\\Users\\WDAGUtilityAccount\\Desktop\\BridgeInbox\\bootstrap\\.ps1&quot;/
   );
   assert.doesNotMatch(xml, /-File &quot;C:\\Bridge\\Sandbox Runs/);
-  assert.match(xml, /<HostFolder>C:\\Bridge\\Sandbox Runs\\inbox &amp; tools<\\/HostFolder>/);
+  assert.match(xml, /<HostFolder>C:\\Bridge\\Sandbox Runs\\inbox &amp; tools<\/HostFolder>/);
   assert.doesNotMatch(xml, /&amp;amp;/);
   assert.throws(
     () => buildWsb(hostInbox, hostOutbox, hostInbox + "\\wrong.ps1", EXECUTION_ID, 60_000),
-    /bootstrap\\.ps1/
+    /bootstrap\.ps1/
   );
 });
 
