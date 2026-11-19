@@ -123,12 +123,6 @@ export class SandboxGitHubIntakeDispatcher implements GitHubIntakeDispatcher {
       return failResult("durable task or intake claim lease has expired", "TASK_LEASE_EXPIRED");
     }
 
-    const projectConfig = matchingProjects[0].config;
-    const github = new GitHubProvider({
-      owner: issueMatch[1],
-      repo: issueMatch[2],
-      ghBin: config.ghBin,
-    });
     const worker = new Worker({
       store: this.options.store,
       registry: this.options.registry,
@@ -161,10 +155,6 @@ export class SandboxGitHubIntakeDispatcher implements GitHubIntakeDispatcher {
       }),
     });
 
-    // projectConfig and github are revalidated above; Worker obtains the same
-    // project config from the registry and reuses its verification/report policy.
-    void projectConfig;
-    void github;
     return worker.dispatchClaimedSandboxTask(task.id);
   }
 }
