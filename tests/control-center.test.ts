@@ -664,6 +664,11 @@ test("control center: activation requires valid attestation and proceeds Sandbox
     assert.equal(ensureBridgeConfig(env.root).sandboxExecutionEnabled, true);
     assert.equal(ensureBridgeConfig(env.root).githubIntakeEnabled, false);
 
+    const runtimeChangeWhileEnabled = await post({ sandboxProviderModelId: "changed-model" });
+    assert.equal(runtimeChangeWhileEnabled.status, 409);
+    assert.equal((await runtimeChangeWhileEnabled.json() as any).code, "RUNTIME_SETTINGS_REQUIRE_GATES_OFF");
+    assert.notEqual(ensureBridgeConfig(env.root).sandboxProviderModelId, "changed-model");
+
     const sameRequest = await post({ sandboxExecutionEnabled: true, githubIntakeEnabled: true });
     assert.equal(sameRequest.status, 409);
     assert.equal((await sameRequest.json() as any).code, "SANDBOX_GATE_MUST_ALREADY_BE_ENABLED");
