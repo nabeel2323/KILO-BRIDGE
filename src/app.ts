@@ -880,6 +880,17 @@ export class KiloBridgeApp {
         store: this.ctx.store,
         registry: this.ctx.registry,
         dispatcher,
+        getConfig: () => {
+          const current = ensureBridgeConfig(this.ctx.bridgeRoot);
+          return {
+            githubIntakeEnabled: current.githubIntakeEnabled,
+            githubIntakeAllowedRepositories: current.githubIntakeAllowedRepositories,
+            ghEnabled: current.ghEnabled,
+            kiloEnabled: current.kiloEnabled,
+            workerEnabled: current.workerEnabled,
+            defaultTaskTimeoutMs: current.defaultTaskTimeoutMs,
+          };
+        },
         workerId: `github-intake:${process.pid}`,
       });
       this.githubIntakeConfigFingerprint = fingerprint;
