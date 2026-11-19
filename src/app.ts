@@ -850,6 +850,7 @@ export class KiloBridgeApp {
     const fingerprint = JSON.stringify({
       githubIntakeEnabled: config.githubIntakeEnabled,
       githubIntakeAllowedRepositories: config.githubIntakeAllowedRepositories,
+      sandboxExecutionEnabled: config.sandboxExecutionEnabled,
       pollIntervalMs: config.pollIntervalMs,
       ghEnabled: config.ghEnabled,
       kiloEnabled: config.kiloEnabled,
@@ -872,6 +873,7 @@ export class KiloBridgeApp {
         config: {
           githubIntakeEnabled: config.githubIntakeEnabled,
           githubIntakeAllowedRepositories: config.githubIntakeAllowedRepositories,
+          sandboxExecutionEnabled: config.sandboxExecutionEnabled,
           ghEnabled: config.ghEnabled,
           kiloEnabled: config.kiloEnabled,
           workerEnabled: config.workerEnabled,
