@@ -554,7 +554,7 @@ test("control center: runtime attestation endpoint is session and CSRF protected
       return { ok: true, status };
     },
   };
-  const env = await setupAuthenticatedServer({ sandboxAttestation: fakeAttestation });
+  const env = await setupAuthenticatedServer({ sandboxAttestation: fakeAttestation as any });
   try {
     const unauthenticated = await fetch(env.baseUrl + "api/sandbox/attestation");
     assert.equal(unauthenticated.status, 401);
@@ -620,7 +620,7 @@ test("control center: activation requires valid attestation and proceeds Sandbox
     }),
   };
   const env = await setupAuthenticatedServer({
-    sandboxAttestation: fakeAttestation,
+    sandboxAttestation: fakeAttestation as any,
     intakeStatus: () => ({
       enabled: false,
       running: intakeRunning,
