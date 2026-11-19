@@ -67,6 +67,46 @@ The page refreshes the current authoritative view when SSE reports an operationa
 The Settings page accepts non-secret configuration:
 
 - Standalone Kilo executable path. It must be an existing absolute-path regular .exe; a .cmd shim is not accepted. Only its filename is returned in the read model.
+
+### Identify the installed Kilo command
+
+Run this in PowerShell from the Windows machine that runs Kilo Bridge:
+
+```powershell
+$kiloCommand = Get-Command kilo -ErrorAction Stop
+$kiloCommand | Format-List Name,CommandType,Source,Path,Definition
+where.exe kilo
+kilo --version
+```
+
+The Phase 3.3 runtime report records Kilo CLI version `7.8.27`. Compare the version printed by the actual executable you intend the Sandbox to run with that accepted host version and record any difference before attesting.
+
+The Sandbox setting must point to a **standalone `kilo.exe`**, not an npm-generated `kilo.cmd` shim. Check the resolved path:
+
+```powershell
+$kiloPath = $kiloCommand.Source
+if (-not $kiloPath -or [System.IO.Path]::GetExtension($kiloPath) -ine ".exe") {
+    throw "The 'kilo' command is a shim or script, not a standalone kilo.exe."
+}
+& $kiloPath --version
+Get-FileHash -LiteralPath $kiloPath -Algorithm SHA256
+```
+
+When the command resolves to `.cmd` or another script, obtain the standalone Windows CLI archive from the [official Kilo CLI documentation](https://kilo.ai/docs/code-with-ai/platforms/cli) and [Kilo releases](https://github.com/Kilo-Org/kilocode/releases). Extract it to a dedicated tools folder outside the Bridge repository, for example:
+
+```powershell
+$installRoot = "C:\Tools\Kilo\standalone"
+New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+# Extract the downloaded official Windows x64 ZIP into $installRoot first.
+$kiloPath = Join-Path $installRoot "kilo.exe"
+if (-not (Test-Path -LiteralPath $kiloPath -PathType Leaf)) {
+    throw "kilo.exe was not found in the extracted archive."
+}
+& $kiloPath --version
+Get-FileHash -LiteralPath $kiloPath -Algorithm SHA256
+```
+
+Use the full absolute path to that `kilo.exe` in **Settings → Sandbox runtime → Standalone Kilo executable path**. Do not commit the binary to Git, place it in the project worktree, or point the setting at `npm.cmd`, `pnpm.cmd`, or a wrapper script. The attestation binds to the executable's hash and version, so replacing or updating it requires a fresh attestation.
 - OpenAI-compatible provider base URL and upstream model ID.
 - API-key environment-variable name, header, and prefix. The API key value is never accepted by the UI or stored in bridge.config.json.
 - GitHub and Kilo prerequisite toggles.
