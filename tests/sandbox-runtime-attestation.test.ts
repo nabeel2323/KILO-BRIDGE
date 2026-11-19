@@ -52,6 +52,7 @@ function createFakeRunner(options: {
   wrongMarker?: boolean;
   cleanup?: "complete" | "failed";
   mutateConfigDuringRun?: (root: string) => void;
+  beforeReturn?: () => Promise<void>;
 }): {
   readiness(): { ready: boolean; reasons: string[] };
   runtimeIdentity(): SandboxRuntimeIdentity;
@@ -88,6 +89,7 @@ function createFakeRunner(options: {
       }), "utf8");
 
       options.mutateConfigDuringRun?.(options.root);
+      await options.beforeReturn?.();
       const providerRequests = options.providerRequests ?? 2;
       const toolEvidence = options.omitWriteEvidence
         ? [{ name: "read", eventType: "tool_call" }]
@@ -124,6 +126,7 @@ async function createService(options: {
   cleanup?: "complete" | "failed";
   isIntakeRunning?: () => boolean;
   mutateConfigDuringRun?: (root: string) => void;
+  beforeReturn?: () => Promise<void>;
 }) {
   const runner = createFakeRunner(options);
   return new SandboxRuntimeAttestationService({
@@ -399,6 +402,49 @@ test("Sandbox attestation: a persistent execution gate changed during the guest 
     assert.equal(fs.existsSync(path.join(env.root, "data", "sandbox-runtime-attestation.json")), false);
     assert.equal(fs.readdirSync(path.join(env.root, "data", "sandbox-runtime-verification")).length, 0);
   } finally {
+    env.cleanup();
+  }
+});
+
+
+test("Sandbox attestation: shared config writer lock is held until guest cleanup completes", async () => {
+  const env = await openEnvironment();
+  let signalStarted!: () => void;
+  let releaseRun!: () => void;
+  const runStarted = new Promise<void>((resolve) => { signalStarted = resolve; });
+  const runRelease = new Promise<void>((resolve) => { releaseRun = resolve; });
+  try {
+    const service = await createService({
+      root: env.root,
+      store: env.store,
+      identity: () => makeIdentity(),
+      beforeReturn: async () => {
+        signalStarted();
+        await runRelease;
+      },
+    });
+    assert.equal(service.startVerification().ok, true);
+    await runStarted;
+
+    const configLockPath = path.join(env.root, "bridge.config.json.lock");
+    assert.equal(fs.existsSync(configLockPath), true);
+    assert.throws(
+      () => updateBridgeConfig(env.root, (current) => ({ ...current, pollIntervalMs: 45000 })),
+      /lock is held by sandbox-runtime-attestation-config-guard/
+    );
+
+    releaseRun();
+    const status = await waitForTerminal(service);
+    assert.equal(status.state, "VALID");
+
+    for (let attempt = 0; attempt < 100 && fs.existsSync(configLockPath); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(fs.existsSync(configLockPath), false);
+    const updated = updateBridgeConfig(env.root, (current) => ({ ...current, pollIntervalMs: 45000 }));
+    assert.equal(updated.pollIntervalMs, 45000);
+  } finally {
+    releaseRun();
     env.cleanup();
   }
 });
