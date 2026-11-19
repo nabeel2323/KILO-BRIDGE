@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ensureBridgeConfig, updateBridgeConfig } from "../src/config";
 import { SqliteStore } from "../src/db";
+import { ExclusiveProcessLock } from "../src/components/processLock";
 import {
   SandboxRuntimeAttestationService,
 } from "../src/components/sandboxRuntimeAttestation";
@@ -296,6 +297,39 @@ test("Sandbox attestation: runtime identity changes and signed-file tampering in
     assert.equal(invalid.valid, false);
     assert.match(invalid.reason || "", /integrity/i);
   } finally {
+    env.cleanup();
+  }
+});
+
+test("Sandbox attestation: a lock held by another Bridge process blocks verification until the active intake poll finishes", async () => {
+  const env = await openEnvironment();
+  const intakeLock = new ExclusiveProcessLock(
+    path.join(env.root, "data", "github-intake.lock"),
+    "github-intake:external-process"
+  );
+  try {
+    assert.equal(intakeLock.acquire().ok, true);
+    const service = await createService({
+      root: env.root,
+      store: env.store,
+      identity: () => makeIdentity(),
+    });
+
+    const blocked = service.startVerification();
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.code, "INTAKE_IS_RUNNING");
+    assert.equal(fs.existsSync(path.join(env.root, "data", "sandbox-runtime-verification")), false);
+    assert.equal(ensureBridgeConfig(env.root).workerEnabled, false);
+    assert.equal(ensureBridgeConfig(env.root).githubIntakeEnabled, false);
+    assert.equal(ensureBridgeConfig(env.root).sandboxExecutionEnabled, false);
+
+    intakeLock.release();
+    const started = service.startVerification();
+    assert.equal(started.ok, true);
+    const status = await waitForTerminal(service);
+    assert.equal(status.state, "VALID");
+  } finally {
+    intakeLock.release();
     env.cleanup();
   }
 });
