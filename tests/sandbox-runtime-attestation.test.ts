@@ -51,6 +51,7 @@ function createFakeRunner(options: {
   omitWriteEvidence?: boolean;
   wrongMarker?: boolean;
   cleanup?: "complete" | "failed";
+  mutateConfigDuringRun?: (root: string) => void;
 }): {
   readiness(): { ready: boolean; reasons: string[] };
   runtimeIdentity(): SandboxRuntimeIdentity;
@@ -86,6 +87,7 @@ function createFakeRunner(options: {
         artifacts: [{ path: MARKER, action: "added", sha256: digest, size: markerBytes.length }],
       }), "utf8");
 
+      options.mutateConfigDuringRun?.(options.root);
       const providerRequests = options.providerRequests ?? 2;
       const toolEvidence = options.omitWriteEvidence
         ? [{ name: "read", eventType: "tool_call" }]
@@ -121,6 +123,7 @@ async function createService(options: {
   wrongMarker?: boolean;
   cleanup?: "complete" | "failed";
   isIntakeRunning?: () => boolean;
+  mutateConfigDuringRun?: (root: string) => void;
 }) {
   const runner = createFakeRunner(options);
   return new SandboxRuntimeAttestationService({
@@ -366,6 +369,30 @@ test("Sandbox attestation: a separate Bridge process holding the intake poll loc
         child.kill();
       });
     }
+    env.cleanup();
+  }
+});
+
+
+test("Sandbox attestation: a persistent execution gate changed during the guest run prevents signing", async () => {
+  const env = await openEnvironment();
+  try {
+    const service = await createService({
+      root: env.root,
+      store: env.store,
+      identity: () => makeIdentity(),
+      mutateConfigDuringRun: (root) => {
+        updateBridgeConfig(root, (current) => ({ ...current, sandboxExecutionEnabled: true }));
+      },
+    });
+    assert.equal(service.startVerification().ok, true);
+    const status = await waitForTerminal(service);
+    assert.equal(status.state, "FAILED");
+    assert.equal(status.valid, false);
+    assert.match(status.reason || "", /execution gate changed/i);
+    assert.equal(fs.existsSync(path.join(env.root, "data", "sandbox-runtime-attestation.json")), false);
+    assert.equal(fs.readdirSync(path.join(env.root, "data", "sandbox-runtime-verification")).length, 0);
+  } finally {
     env.cleanup();
   }
 });
