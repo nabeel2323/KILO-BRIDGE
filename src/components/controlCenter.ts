@@ -794,17 +794,36 @@ export class ControlCenterServer {
   private settingsReadModel(): Record<string, unknown> {
     const config = ensureBridgeConfig(this.bridgeRoot);
     const worker = this.workerReadModel();
+    const providerApiKeyPresent = Boolean(
+      config.sandboxProviderApiKeyEnv &&
+      process.env[config.sandboxProviderApiKeyEnv]
+    );
+    const sandboxKiloExecutable =
+      config.sandboxKiloExePath.trim() || process.env.KILO_SANDBOX_EXE || "";
+    const intakeStatus = this.intakeStatusReadModel();
     return {
       gates: {
         workerEnabled: config.workerEnabled,
         githubIntakeEnabled: config.githubIntakeEnabled,
         sandboxExecutionEnabled: config.sandboxExecutionEnabled,
+        ghEnabled: config.ghEnabled,
+        kiloEnabled: config.kiloEnabled,
         githubIntakeAllowedRepositories: config.githubIntakeAllowedRepositories,
       },
       pollIntervalMs: config.pollIntervalMs,
       workerRunning: worker.running,
-      intakeRuntimeAvailable: this.intakeStatusReadModel().dispatcherReady,
-      intakeRuntimeReason: this.intakeStatusReadModel().reason,
+      intakeRuntimeAvailable: intakeStatus.dispatcherReady,
+      intakeRuntimeReason: intakeStatus.reason,
+      sandbox: {
+        kiloExecutableConfigured: Boolean(sandboxKiloExecutable),
+        kiloExecutableName: sandboxKiloExecutable ? path.win32.basename(sandboxKiloExecutable) : null,
+        providerBaseUrl: config.sandboxProviderBaseUrl,
+        providerModelId: config.sandboxProviderModelId,
+        providerApiKeyEnv: config.sandboxProviderApiKeyEnv,
+        providerApiKeyPresent,
+        providerApiKeyHeader: config.sandboxProviderApiKeyHeader,
+        providerApiKeyPrefix: config.sandboxProviderApiKeyPrefix,
+      },
     };
   }
 
@@ -815,8 +834,17 @@ export class ControlCenterServer {
     const allowed = new Set([
       "githubIntakeEnabled",
       "workerEnabled",
+      "sandboxExecutionEnabled",
+      "ghEnabled",
+      "kiloEnabled",
       "githubIntakeAllowedRepositories",
       "pollIntervalMs",
+      "sandboxKiloExePath",
+      "sandboxProviderBaseUrl",
+      "sandboxProviderApiKeyEnv",
+      "sandboxProviderModelId",
+      "sandboxProviderApiKeyHeader",
+      "sandboxProviderApiKeyPrefix",
     ]);
     const fields = Object.keys(body);
     if (fields.length === 0 || fields.some((field) => !allowed.has(field))) {
@@ -824,15 +852,22 @@ export class ControlCenterServer {
       return;
     }
 
-    // This milestone permits disabling gates but deliberately refuses to enable
-    // either autonomous executor until a real Windows Sandbox dispatcher exists.
-    if (body.githubIntakeEnabled === true || body.workerEnabled === true) {
+    // The Control Center can prepare prerequisites and disable executors, but
+    // it cannot authorize a new autonomous execution path. Activation remains
+    // blocked until a real Sandbox guest acceptance has been independently
+    // completed and recorded by the operator release procedure.
+    if (
+      body.githubIntakeEnabled === true ||
+      body.workerEnabled === true ||
+      body.sandboxExecutionEnabled === true
+    ) {
       this.sendJson(response, 409, {
-        error: "Automation cannot be enabled from the Control Center until isolated task dispatch and runtime acceptance are complete.",
+        error: "Execution gates cannot be enabled from the Control Center until the real Windows Sandbox runtime acceptance is complete.",
       });
       return;
     }
-    for (const key of ["githubIntakeEnabled", "workerEnabled"]) {
+
+    for (const key of ["githubIntakeEnabled", "workerEnabled", "sandboxExecutionEnabled", "ghEnabled", "kiloEnabled"]) {
       if (key in body && typeof body[key] !== "boolean") {
         this.sendJson(response, 400, { error: key + " must be a boolean." });
         return;
@@ -847,6 +882,86 @@ export class ControlCenterServer {
       (!Array.isArray(body.githubIntakeAllowedRepositories) ||
        !body.githubIntakeAllowedRepositories.every((entry) => typeof entry === "string"))) {
       this.sendJson(response, 400, { error: "githubIntakeAllowedRepositories must be an array of owner/repo strings." });
+      return;
+    }
+
+    if ("sandboxKiloExePath" in body) {
+      if (typeof body.sandboxKiloExePath !== "string" || body.sandboxKiloExePath.length > 2048) {
+        this.sendJson(response, 400, { error: "sandboxKiloExePath must be a string no longer than 2048 characters." });
+        return;
+      }
+      const executable = body.sandboxKiloExePath.trim();
+      if (executable) {
+        if (!path.isAbsolute(executable) || path.extname(executable).toLowerCase() !== ".exe" || !fs.existsSync(executable)) {
+          this.sendJson(response, 400, { error: "sandboxKiloExePath must be an absolute path to an existing .exe file." });
+          return;
+        }
+        try {
+          const stat = fs.lstatSync(executable);
+          if (!stat.isFile() || stat.isSymbolicLink()) {
+            this.sendJson(response, 400, { error: "sandboxKiloExePath must reference a regular, non-symbolic-link file." });
+            return;
+          }
+        } catch {
+          this.sendJson(response, 400, { error: "sandboxKiloExePath could not be inspected safely." });
+          return;
+        }
+      }
+    }
+
+    if ("sandboxProviderBaseUrl" in body) {
+      if (typeof body.sandboxProviderBaseUrl !== "string" || body.sandboxProviderBaseUrl.length > 2048) {
+        this.sendJson(response, 400, { error: "sandboxProviderBaseUrl must be a string no longer than 2048 characters." });
+        return;
+      }
+      const raw = body.sandboxProviderBaseUrl.trim();
+      if (raw) {
+        try {
+          const url = new URL(raw);
+          if (
+            url.username || url.password || url.search || url.hash ||
+            !(url.protocol === "https:" ||
+              (url.protocol === "http:" && ["127.0.0.1", "localhost"].includes(url.hostname)))
+          ) {
+            this.sendJson(response, 400, { error: "sandboxProviderBaseUrl must use HTTPS or loopback HTTP and must not include credentials, query strings, or fragments." });
+            return;
+          }
+        } catch {
+          this.sendJson(response, 400, { error: "sandboxProviderBaseUrl must be a valid URL." });
+          return;
+        }
+      }
+    }
+
+    const stringLimits: Array<[string, number]> = [
+      ["sandboxProviderApiKeyEnv", 128],
+      ["sandboxProviderModelId", 160],
+      ["sandboxProviderApiKeyHeader", 64],
+      ["sandboxProviderApiKeyPrefix", 32],
+    ];
+    for (const [key, maxLength] of stringLimits) {
+      if (key in body && (typeof body[key] !== "string" || (body[key] as string).length > maxLength)) {
+        this.sendJson(response, 400, { error: key + " must be a string no longer than " + maxLength + " characters." });
+        return;
+      }
+    }
+    if ("sandboxProviderApiKeyEnv" in body) {
+      const envName = (body.sandboxProviderApiKeyEnv as string).trim();
+      if (envName && !/^[A-Z_][A-Z0-9_]*$/i.test(envName)) {
+        this.sendJson(response, 400, { error: "sandboxProviderApiKeyEnv must be a valid environment-variable name." });
+        return;
+      }
+    }
+    if ("sandboxProviderModelId" in body && /[\r\n\0]/.test(body.sandboxProviderModelId as string)) {
+      this.sendJson(response, 400, { error: "sandboxProviderModelId must not contain control characters." });
+      return;
+    }
+    if ("sandboxProviderApiKeyHeader" in body && !/^[A-Za-z0-9-]{1,64}$/.test(body.sandboxProviderApiKeyHeader as string)) {
+      this.sendJson(response, 400, { error: "sandboxProviderApiKeyHeader contains unsupported characters." });
+      return;
+    }
+    if ("sandboxProviderApiKeyPrefix" in body && /[\r\n]/.test(body.sandboxProviderApiKeyPrefix as string)) {
+      this.sendJson(response, 400, { error: "sandboxProviderApiKeyPrefix must not contain line breaks." });
       return;
     }
 
@@ -866,6 +981,10 @@ export class ControlCenterServer {
           fields: fields.sort(),
           repositoryCount: updated.githubIntakeAllowedRepositories.length,
           pollIntervalMs: updated.pollIntervalMs,
+          ghEnabled: updated.ghEnabled,
+          kiloEnabled: updated.kiloEnabled,
+          sandboxExecutionEnabled: updated.sandboxExecutionEnabled,
+          providerApiKeyPresent: Boolean(updated.sandboxProviderApiKeyEnv && process.env[updated.sandboxProviderApiKeyEnv]),
         }),
       });
       this.sendJson(response, 200, this.settingsReadModel());
