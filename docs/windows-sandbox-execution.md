@@ -66,8 +66,24 @@ The Control Center never accepts the API-key value. Set the secret in the Window
 
 Provider URL validation rejects embedded credentials, query strings, fragments, non-HTTPS URLs (except loopback HTTP), and invalid API-key header/prefix values.
 
+## One-time runtime attestation
+
+The local Control Center exposes the Run one-time Sandbox verification action in Settings. It is intended to be run on the operator's actual Windows machine, after preparing the standalone Kilo executable, provider URL/model, and API-key environment variable.
+
+The attestation service:
+- Refuses to start while the generic worker, dedicated intake, or persistent Sandbox execution gate is enabled, or while intake is running.
+- Uses a temporary in-memory config override; it does not persistently change any execution gate.
+- Creates an empty Bridge-owned verification workspace rather than using a registered project or GitHub repository.
+- Runs a UUID/nonce-bound task that asks Kilo's native write tool to create exactly one marker file.
+- Requires a successful matching manifest, Kilo exit code zero, all required guest/provider/Kilo stages, at least one provider request, a native write-tool event, exact marker bytes and matching SHA-256/size declarations, runner evidence, and complete cleanup.
+- Writes a local HMAC-signed attestation with a 24-hour lifetime. The signing key is stored separately. Prompts, task nonce, API key, provider request bodies, and raw Kilo stdout/stderr are not copied into the attestation.
+- Binds the proof to Kilo and Windows Sandbox executable hashes/versions, provider URL/model and non-secret auth configuration identity, Node/OS identity, and the runner contract. Changes or expiry invalidate the proof.
+- Shares the same attestation authority with the application and claim-bound dispatcher; missing, invalid, expired, or runtime-mismatched proof makes dispatcher readiness false.
+
+The operator then explicitly enables sandboxExecutionEnabled in Settings. Dedicated intake is a separate next step and requires Sandbox already enabled, a valid current attestation, GitHub/Kilo prerequisites, a non-empty trusted repository allowlist, and dispatcher readiness. The operator must still press Start to begin intake. The legacy workerEnabled gate is not exposed for activation through this workflow.
+
 ## Verification status and release gate
 
-Source, generated WSB XML, provider bridge JavaScript, manifest/path checks, fail-closed gate behavior, claim-bound lifecycle, and Control Center settings are covered by Windows CI.
+Source, generated WSB XML, provider bridge JavaScript, manifest/path checks, fail-closed gate behavior, claim-bound lifecycle, attestation signing/expiry/fingerprint logic, and staged Control Center activation are covered by committed source and regression tests.
 
-Real guest runtime acceptance remains outstanding. Current CI does not provision the operator's Kilo executable, upstream provider credentials, or interactive Windows Sandbox session. The generalized runner must still complete a one-time verification task in a disposable workspace on the operator's actual Windows machine. Until an operator-facing verification/attestation workflow is implemented and that verification succeeds, keep sandboxExecutionEnabled=false and githubIntakeEnabled=false. Do not edit configuration manually to bypass this release gate.
+The newest attestation and gate-activation commits do not yet have a verified Windows CI result in the repository status evidence retrieved for this update. More importantly, real guest runtime acceptance remains outstanding: CI does not provision the operator's Kilo executable, upstream provider credentials, or interactive Windows Sandbox session. Until the operator runs the Settings verification action and obtains runtimeAttestation.valid=true, keep sandboxExecutionEnabled=false and githubIntakeEnabled=false. Do not edit configuration manually to bypass this release gate.
