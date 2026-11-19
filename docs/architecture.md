@@ -1,58 +1,76 @@
-# Architecture Overview
+# Kilo Bridge Architecture
 
-Kilo Bridge is a configuration-driven, multi-project coordinator. Components are independent and wired through explicit interfaces so the GitHub transport can later be replaced by an authenticated MCP integration without rewriting the execution engine.
+Kilo Bridge is a configuration-driven, multi-project development coordinator. GitHub Issues are the task source of truth; the Bridge owns eligibility checks, durable claims, isolated execution, verification, reporting, and local operational state.
 
-## Components
+## Runtime components
 
-| Component | File | Responsibility |
+| Component | Source | Responsibility |
 |---|---|---|
-| Project Registry | `src/components/registry.ts` | Register/validate/enable/disable/inspect projects; structural validation; config templates |
-| GitHub Communication Provider | `src/components/github.ts` | Authenticated `gh api` transport: issues, comments, labels, draft PRs, rate limits |
-| Task Queue & Lifecycle Manager | `src/components/lifecycle.ts` | Atomic transitions, persistent leases, idempotency keys, correction attempts, lease recovery |
-| Local Worker | `src/components/worker.ts` | Legacy polling loop, execution pipeline, corrections, publishing orchestration, singleton lock, graceful shutdown |
-| Kilo CLI Adapter | `src/components/kilo.ts` | Preflight (detect/help/auth/model/agent), safe argv construction, event parsing, session capture, redaction |
-| Git Worktree Manager | `src/components/worktree.ts` | Origin verification, base SHA recording, isolated worktrees, change inventory, Bridge-owned commit/push |
-| Security & Permission Manager | `src/components/security.ts` | Deny-by-default `kilo.json` generation, denial verification, Bridge command policy, path guards, redaction |
-| Independent Verification Engine | `src/components/verification.ts` | Config-driven command suites, required/advisory/conditional checks, timeouts, prohibited-command blocking |
-| Report Generator | `src/components/report.ts` | Per-execution Markdown reports, GitHub comment bodies, COMPLETE gating |
-| SQLite Persistence Layer | `src/db.ts` | sql.js (WASM SQLite) with persist-on-write, migrations, audit log |
-| CLI Administration | `src/cli.ts`, `src/app.ts` | Human + `--json` output, all admin commands |
-| Logging & Notifications | `src/components/logging.ts` | JSON line logs per level, Windows balloon notifications |
-| Publishing Manager | `src/components/publishing.ts` | Approval enforcement, prohibited-file scan, commit/push/draft PR |
-| Process Runner | `src/components/process.ts` | cross-spawn execution, capture, timeout, process-tree kill |
+| App and CLI | src/app.ts, src/cli.ts | Initialize storage/configuration and expose administration/service lifecycle |
+| Project registry | src/components/registry.ts | Validate and manage project/repository mappings |
+| GitHub provider | src/components/github.ts | GitHub CLI/API transport for Issues, comments, labels, and repository operations |
+| Generic worker | src/components/worker.ts | Existing generic polling/execution/publishing workflow; independent workerEnabled gate |
+| Dedicated intake | src/components/githubIntake.ts | Allowlisted Issue discovery, eligibility checks, durable claims, continuous polling |
+| Sandbox dispatcher | src/components/sandboxGitHubIntakeDispatcher.ts | Validate claim identity, project mapping, task lease, and trust gates before dispatch |
+| Windows Sandbox runner | src/components/windowsSandboxTaskRunner.ts | Stage one task in a disposable guest and validate returned evidence/artifacts |
+| Security manager | src/components/security.ts | Effective Kilo permissions, deny-by-default command policy, path checks, redaction |
+| Worktree manager | src/components/worktree.ts | Create the task worktree, protect the main checkout, inventory changes |
+| Verification engine | src/components/verification.ts | Run configured independent verification after artifact import |
+| Report generator | src/components/report.ts | Generate execution reports and GitHub feedback |
+| Persistence | src/db.ts | SQL.js store, forward-only migrations, durable task/claim/execution state, audit data |
+| Local Control Center | src/components/controlCenter.ts, src/components/controlCenterPage.ts | Authenticated loopback operational browser UI |
 
-## Data flow (one task)
+## Dedicated GitHub intake flow
 
-1. **Discover**: worker polls `GET repos/{o}/{r}/issues?state=open&labels=kilo:ready` via `gh api --paginate`. PRs are filtered out; only authorized authors pass.
-2. **Claim**: idempotency key `sha256(projectId:issueNumber)` prevents duplicates; a persistent lease (10 min TTL) prevents concurrent execution. Transition `READY → CLAIMED` is recorded in SQLite and persisted immediately.
-3. **Isolate**: fetch `origin/<baseBranch>`, record base SHA, create `ai/kilo/issue-N[-attempt-K]` and a worktree under the project's worktree root. Conflicts stop safely.
-4. **Secure**: write `kilo.json` (deny-by-default) + `bridge.command-policy.json` into the worktree; verify required denials; run `kilo config check`. Refuse execution on any failure.
-5. **Execute**: `kilo run --auto --format json --dir <worktree> --title "GitHub Issue #N" "<spec>"` as a child process with explicit argv, captured stdout/stderr, configurable timeout, process-tree kill.
-6. **Verify**: run the project's configured verification commands independently of the agent. Record command, start/end, exit code, duration, output paths.
-7. **Report**: write a per-execution Markdown report, post a compact comment (with `[kilo-bridge-report]` marker) to the issue, transition to `REPORT_READY` (or `BLOCKED`/`FAILED`), sync labels.
-8. **Follow-up**: authorized comments + `kilo:changes-requested` trigger a new attempt (new branch/worktree, previous reports preserved).
-9. **Publish**: only with `kilo:publish-approved` + project `publishingEnabled` + passing required verification + clean prohibited-file scan. The Bridge commits, pushes the feature branch, opens a **draft** PR to the configured base branch. Never merges.
+1. Operator preparation: configure the provider, standalone Kilo executable, provider-key environment-variable name, trusted repository allowlist, and project author allowlist.
+2. Explicit gates: dedicated intake requires githubIntakeEnabled=true, sandboxExecutionEnabled=true, ghEnabled=true, kiloEnabled=true, and at least one trusted repository. The generic workerEnabled gate is separate and is deliberately false in the dedicated dispatcher.
+3. Discovery: intake inspects only active registered projects whose exact owner/repo mapping is trusted. It lists open Issues carrying kilo:ready.
+4. Eligibility: pull requests are excluded. An Issue must be open, have an allowed author, bounded title/body, and a canonical HTTPS GitHub Issue URL matching the registered repository. The service re-fetches the Issue before claiming it.
+5. Durable claim: the Bridge persists a claim keyed by repository, Issue number, and assignment generation before mutating GitHub labels. Claim owner, random token, lease, task association, and reconciliation status are persisted.
+6. Dispatch validation: the dispatcher verifies the persisted claim, task and owner/token, Issue URL, current allowlist, unique active project mapping, task lease, and Sandbox readiness. Uncertain outcomes become RECONCILIATION_REQUIRED and are not blindly relaunched.
+7. Isolated execution: the worker prepares a task worktree, writes Bridge/Kilo security policy, and calls only the Windows Sandbox runner. The dispatcher constructs the worker with workerEnabled=false; there is no host-Kilo fallback.
+8. Evidence and import: the guest returns a UUID-bound manifest with stage results, Kilo exit code/version, native tool-call evidence, and artifact hashes. The host validates the manifest and every path/hash before applying changes transactionally to the task worktree.
+9. Verification/report: Bridge-owned verification runs independently after artifact import. The Bridge stores an execution record, generates a report, posts feedback to the same Issue, and reconciles labels/task/claim state.
+10. Follow-up: correction requests and later attempts remain explicit lifecycle operations. Publishing remains separate and approval-controlled; dedicated intake does not publish, merge, or deploy.
+
+GitHub Issue bodies and comments are untrusted task input, never security policy. They cannot override Bridge isolation, path, credential, or publishing restrictions.
+
+## Windows Sandbox boundary
+
+The generalized runner creates one disposable Sandbox session per task. Its WSB file disables guest networking, clipboard/printer/audio/video redirection, and maps three host directories:
+
+| Mapping | Guest access | Purpose |
+|---|---|---|
+| Inbox | Read-only | Standalone Kilo and Node executables, effective Kilo config, provider bridge, filtered project payload, untrusted task specification |
+| Outbox | Read/write | Guest-created provider request envelopes, operational logs, result manifest, changed artifact files |
+| Provider responses | Read-only | Host-authored provider response stream files; guest cannot modify host response data |
+
+The guest provider bridge listens only on guest loopback. Provider requests are written to the outbox; the host validates each request and forwards it only to the configured provider URL. Responses are written to the separate read-only response mapping. The provider API key is read from the Bridge process environment, added by the host to the upstream request, and is not copied into the guest or persisted in bridge.config.json. Upstream redirects are rejected.
+
+The staged worktree excludes Git metadata, dependencies, Kilo/Bridge internals, and configured sensitive folders/files. Symbolic links, path traversal, Windows-invalid paths, sensitive paths, and unsafe guest artifacts are rejected. Artifact import validates the complete change set, stages backups outside guest-mapped folders, and attempts rollback if a replacement fails.
+
+Kilo execution and the host Bridge are separate trust boundaries. The generic worker path still exists for legacy/manual operation; the dedicated intake dispatcher never uses it as a fallback.
 
 ## Persistence
 
-SQLite via `sql.js` (WASM). Mutations are persisted to disk on writes. Schema migrations are versioned via `PRAGMA user_version` (currently v4). Tables: `projects`, `tasks`, `task_transitions`, `executions`, `verifications`, `reports`, `security_policies`, `audit_log`, `meta`.
+The project uses SQL.js (WASM SQLite). Schema migrations are versioned through PRAGMA user_version; the current implementation includes schema v5 durable GitHub intake claims. The store uses a process-level persistence lock and stale-snapshot guard so an old SQL.js snapshot cannot silently overwrite a newer process write.
 
-## Transport abstraction
+Durable records include projects, tasks, transitions, executions, verifications, reports, security policies, audit entries, and GitHub intake claims. Bounded Sandbox operational evidence is atomically stored under data/sandbox-evidence/<executionId>.json. It contains stage names/timestamps, Kilo exit/version, tool names/event types, artifact hashes/sizes, provider request count, validation errors, and sanitized error text—not prompts, provider request bodies, credentials, raw Kilo stdout/stderr, or reasoning.
 
-`GitHubProvider` is the only component that knows about GitHub. The worker depends on its method surface (issues/comments/labels/PRs), not on `gh` specifics. A future MCP transport can implement the same surface.
+## Control Center security and role
 
-## What V1 deliberately does NOT do
+The Control Center binds to 127.0.0.1 only. It uses a one-time setup token, locally configured scrypt password, server-side expiring sessions, Host/Origin checks, CSRF protection, bounded request bodies, login throttling, CSP/security headers, and audited settings/project changes. Authenticated SSE is a change-notification mechanism; reconnecting clients reload an authoritative database-backed snapshot.
 
-- No public HTTP server, tunnel, webhook listener, or remote execution endpoint.
-- No live streaming claims — polling is a persistent handoff mechanism.
-- No OS-level isolation claims — worktrees are filesystem isolation, not a sandbox. The worker should eventually run under a dedicated standard Windows account (see [security model](security-model.md)).
+The UI can prepare provider/repository settings and disable execution gates. It does not currently authorize enabling an execution gate. The missing release prerequisite is an operator-hosted real Sandbox guest verification/attestation flow, after which the gates may be unlocked through an explicit operator action.
 
-## GitHub intake and Control Center roadmap status
+## Non-goals and current limitations
 
-The configuration schema now defines two separate operational controls:
+- No public HTTP listener, public webhook, tunnel, or remote execution endpoint.
+- No automatic Issue execution on a fresh installation.
+- No generic worker activation as a side effect of enabling dedicated intake.
+- No secret value is stored in Bridge configuration or sent to the Sandbox guest.
+- No automatic approval, publication, merge, or deployment from dedicated intake.
+- A green hosted CI run does not prove a real guest run on the operator's Windows machine.
+- The generalized runner has source/build/test coverage, but real guest execution and browser-level operator acceptance remain outstanding.
 
-- `workerEnabled`: existing generic worker gate; unchanged.
-- `githubIntakeEnabled`: dedicated autonomous intake gate; defaults to `false`.
-- `githubIntakeAllowedRepositories`: exact `owner/repo` allowlist; defaults to an empty array.
-
-The dedicated intake service and Control Center are still under implementation. Configuring either intake value does not start polling today. The service must remain disabled until its own implementation and runtime acceptance are complete. See the [implementation plan](github-control-center-implementation-plan.md) and [progress tracker](github-control-center-implementation-progress.md).
+See Windows Sandbox Execution, Control Center Operations, Windows Configuration, and the implementation progress tracker.

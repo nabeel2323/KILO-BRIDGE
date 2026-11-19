@@ -2,126 +2,120 @@
 
 ## Scope
 
-The Kilo Bridge Control Center is an authenticated browser interface served by the local Bridge process. It is loopback-only, provides database-backed operational views, and supports a limited set of audited project/configuration updates. Its GitHub intake page exposes explicit Start and Stop actions for the dedicated intake service.
+The Kilo Bridge Control Center is an authenticated browser interface served by the local Bridge process. It binds to IPv4 loopback only, reads actual Bridge database/configuration state, exposes audited operator settings, and provides explicit Start/Stop controls for the dedicated GitHub intake service.
 
-The service is connected to a claim-bound Windows Sandbox dispatcher and the existing Worker verification/report lifecycle. It does not use the generic worker polling loop and does not fall back to host Kilo. It does not approve publication, open pull requests, merge, or deploy. The generalized Sandbox runner has passed source, build, and Windows CI checks, but a real task execution by this generalized runner inside a Windows Sandbox guest has not yet been verified on the operator's machine.
+The dedicated intake service uses durable GitHub claims and a claim-bound Windows Sandbox dispatcher. It does not use generic worker polling and never falls back to host Kilo. The dispatcher continues through Bridge worktree, security, verification, report, and GitHub feedback lifecycle. Dedicated intake does not approve publication, push, merge, or deploy.
+
+**Current limitation:** the generalized Sandbox runner has source, build, Windows CI, and regression-test coverage, but a real guest task has not yet been verified on the operator's Windows machine. The Control Center currently rejects attempts to enable execution gates until a real guest verification/attestation workflow has been implemented.
 
 ## Requirements
 
-- Node.js version supported by this Kilo Bridge release.
-- A locally initialized Kilo Bridge directory.
-- Permission to create files under the Bridge `data` directory.
-- A browser on the same Windows machine.
+- Supported Node.js runtime and a locally initialized Bridge directory.
+- Permission to create files under the Bridge data directory.
+- Windows host with an interactive desktop and Windows Sandbox for future guest acceptance.
+- Browser on the same Windows machine.
 
 ## First-time setup
 
-Run the following commands in PowerShell from the Kilo Bridge repository:
+Run in PowerShell from the Kilo Bridge repository:
 
-```powershell
-pnpm run build
-node .\dist\cli.js init
-node .\dist\cli.js control-center setup
-```
+    pnpm run build
+    node .\dist\cli.js init
+    node .\dist\cli.js control-center setup
 
-The setup command prints a high-entropy, one-time bootstrap token to the terminal. Copy it immediately. The Bridge stores only a SHA-256 digest of the token, not the plaintext value. The token is consumed when the local password is configured.
+The setup command prints a high-entropy, one-time bootstrap token. The Bridge stores only its SHA-256 digest. Use the token once in the browser to configure a strong local password (minimum 14 characters).
 
 Start the Control Center:
 
-```powershell
-node .\dist\cli.js control-center start
-```
+    node .\dist\cli.js control-center start
 
-Open the loopback URL printed by the command (default port 4190). On the first browser visit, enter the one-time setup token and choose a strong password of at least 14 characters.
+Open the loopback URL printed by the command (default port 4190). Keep the terminal open; Ctrl+C stops the server. Use another local port when required:
 
-Keep the terminal open while using the Control Center. Press Ctrl+C in that terminal to stop it.
+    node .\dist\cli.js control-center start 4191
 
-A different port can be selected when needed:
-
-```powershell
-node .\dist\cli.js control-center start 4191
-```
-
-To use a non-default Bridge root, set `KILO_BRIDGE_ROOT` before running either command. The Control Center uses the same root as the Bridge database and configuration.
+Set KILO_BRIDGE_ROOT before running the commands when using a non-default Bridge root.
 
 ## Security model
 
-- The server binds explicitly to `127.0.0.1`. Non-loopback binding is rejected by the server constructor.
-- Requests with a non-loopback peer address or unexpected Host header are rejected.
-- Browser POST requests must carry the exact same-origin Origin header.
-- Authenticated state-changing requests must also include the per-session CSRF token.
-- The first-run token is high entropy, one-time, and stored only as a digest.
-- The local operator password is derived with Node.js scrypt and a random salt. The plaintext password is never written to disk.
-- Session identifiers are random, held server-side in memory, and expire after eight hours. Restarting the server invalidates existing sessions.
-- The authenticated /api/events SSE stream is read-only, limited to two connections per session, and closed when the operator logs out. It sends an initial operational revision snapshot, then revision-change notifications and keep-alive heartbeats.
-- On initial connection or reconnect, the browser fetches the current database-backed view again. The SSE stream is a change-notification mechanism, not a durable event archive or substitute for the database task/audit history.
-- Session cookies are HttpOnly and SameSite=Strict. The current server uses plain HTTP on loopback, so the Secure cookie attribute is not set; the listener is not exposed to LAN/public interfaces.
-- Request bodies are limited to 64 KiB. Login attempts are rate-limited.
-- CSP, frame denial, content-type sniffing protection, referrer restrictions, and a restrictive Permissions Policy are applied.
-- Project local paths, worktree paths, credential fields, raw audit details, and claim tokens are not included in the UI read models.
-- Task bodies and other GitHub-sourced task content are untrusted. The page renders them as escaped text rather than HTML.
-- Configuration writes use a cross-process lock and atomic same-directory file replacement. CLI and Control Center setting updates use the locked read-modify-write helper.
-- Project state changes and settings updates create audit records. Audit entries record changed setting names and counts, not submitted credentials or raw task bodies.
+- Server binding is exactly 127.0.0.1; non-loopback peers and unexpected Host headers are rejected.
+- Browser POST requests require same-origin Origin and per-session CSRF validation.
+- One-time setup token is high entropy and stored only as a digest. Passwords use scrypt with random salt.
+- Session IDs are random and held server-side in memory; they expire and are invalidated by server restart.
+- Session cookies are HttpOnly and SameSite=Strict. The loopback server uses HTTP, so Secure cookie is not set.
+- CSP and other security headers are applied; request bodies are bounded; login attempts are throttled.
+- The UI omits local paths, worktree paths, claim tokens, raw audit details, and API-key values.
+- GitHub task content is rendered as escaped text and is untrusted input.
+- Settings changes use a cross-process config lock and atomic same-directory replacement. Changes are audited.
+- Authenticated SSE sends a change notification and current operational revision; reconnecting clients reload an authoritative database-backed snapshot.
 
-The authentication file is located at `data/control-center-auth.json`. Protect the Bridge data directory using the Windows account ACLs appropriate for the operator. Do not copy this file or share the bootstrap token.
+Protect data/control-center-auth.json and the Bridge data directory with appropriate Windows account ACLs. Never share the bootstrap token.
 
-## Implemented browser areas
+## Browser areas
 
-- Overview: configured feature gates, projects/tasks/claim counts, worker heartbeat information, and recent persisted tasks.
-- Projects: project identity, repository mapping, state, and allowed authors (filesystem paths are omitted).
-- GitHub intake: durable claim records, trusted repository list, dispatcher readiness, and explicit Start/Stop controls. The page never starts polling merely by being opened or refreshed.
-- Tasks & executions: task instructions, lifecycle transitions, execution summaries, and verification outcomes.
-- Review center: tasks in report-ready, blocked, failed, correction, or publication-review states.
-- Activity & audit: action, actor, project, and timestamp (raw audit detail is omitted).
-- Settings: current gate values, trusted repository allowlist, and polling interval. Repository allowlist and polling interval can be updated and are audited.
-- Project controls: an operator can enable or disable a registered project; the change is audited.
+- Overview: feature gates, actual project/task/claim counts, worker state, and recent tasks.
+- Projects: registered project/repository identity, state, and allowed authors; local paths are omitted.
+- GitHub intake: dispatcher readiness, trusted repositories, durable claim queue, and Start/Stop controls.
+- Tasks/executions: task body, lifecycle, execution summary, verifications, and reports.
+- Review: report-ready, blocked, failed, and correction states; it does not grant publication approval.
+- Activity/audit: operator actions and timestamps.
+- Settings: provider/runtime configuration, trusted repository list, polling interval, prerequisite switches, and gate status.
 
-All displayed information is derived from the Bridge database, registry, and configuration file. The UI refreshes the current view when the authenticated SSE feed detects a change to the operational database watermark. Manual refresh remains available. Reconnection fetches a new authoritative snapshot; missed event notifications are not replayed as an audit history.
+The page refreshes the current authoritative view when SSE reports an operational change. It also supports manual refresh; missed SSE events are not replayed as historical audit events.
 
-## GitHub intake operation and safety gates
+## Preparing the Sandbox runtime
 
-The dedicated intake service is integrated with `KiloBridgeApp` and the Control Center. The GitHub intake page reports whether the intake gate is enabled, whether the service is running, whether the Sandbox dispatcher reports ready, and which repositories are trusted.
+The Settings page accepts non-secret configuration:
 
-The Start action is explicit. It requires all of the following at start time:
+- Standalone Kilo executable path. It must be an existing absolute-path regular .exe; a .cmd shim is not accepted. Only its filename is returned in the read model.
+- OpenAI-compatible provider base URL and upstream model ID.
+- API-key environment-variable name, header, and prefix. The API key value is never accepted by the UI or stored in bridge.config.json.
+- GitHub and Kilo prerequisite toggles.
+- Trusted repository allowlist and polling interval.
 
-- `githubIntakeEnabled=true` and `sandboxExecutionEnabled=true`.
-- `ghEnabled=true` and `kiloEnabled=true`.
-- At least one repository in `githubIntakeAllowedRepositories`, with an active registered project mapping and an allowed task author.
-- Windows Sandbox enabled on the host, an interactive Windows desktop session, a configured standalone `kilo.exe`, and a valid OpenAI-compatible provider endpoint/model. The optional API key is read from the named environment variable in the Bridge process; the key itself is not stored in configuration or copied into the guest.
+The API-key value must be provisioned in the environment of the Bridge process and the Bridge restarted after it changes. The UI only reports whether the named environment variable is present. If the custom Kilo path field is blank, the current setting is preserved; use the clear-path checkbox to remove it and fall back to KILO_SANDBOX_EXE.
 
-The service does not start automatically when the Bridge or Control Center starts. An operator must click **Start automatic intake** after all prerequisites are prepared. Once started, it polls at the configured interval and automatically processes eligible Issues bearing the ready label; there is no per-Issue Run Task action. The generic `workerEnabled` gate is independent and remains false for this dedicated path. The dispatcher constructs a Worker with its generic polling gate explicitly false and executes only a task already claimed by the intake owner.
+Provider URLs must use HTTPS, except HTTP on 127.0.0.1 or localhost; embedded credentials, query strings, and fragments are rejected. The host relay refuses redirects.
 
-**Do not enable the gates or start intake until the generalized Sandbox runner has completed a real guest execution on the operator's Windows machine using a disposable test repository and a controlled provider.** Hosted Windows CI validates the generated JavaScript, PowerShell bootstrap, WSB XML, TypeScript, build, and test suite; it does not prove the new runner has completed a real guest task. The gates remain false by default. The Control Center settings API currently rejects attempts to turn either execution gate on, while still allowing operators to turn them off and edit the trusted repository list/poll interval.
+## Execution gates and automatic intake
 
-The Stop action stops future polling ticks; it does not forcibly terminate a task already in the middle of the Worker/Sandbox/verification/report lifecycle. Allow that execution to finish and reconcile its durable claim before restarting intake.
+| Gate | Purpose | Fresh-install default |
+|---|---|---:|
+| workerEnabled | Existing generic worker | false |
+| sandboxExecutionEnabled | Generalized Windows Sandbox task execution | false |
+| githubIntakeEnabled | Dedicated autonomous GitHub Issue discovery | false |
 
-## Current limitations
+The repository allowlist defaults to empty; this trusts no repository. ghEnabled and kiloEnabled are prerequisites, not automatic execution gates.
 
-- The generalized runner has not yet completed a real end-to-end task inside Windows Sandbox on the user's host.
-- Browser-level acceptance on the user's local Windows browser has not been independently observed in this session.
-- Review actions, publication approval, pull request creation, merge, and deployment are not available.
+The dedicated intake path checks both intake and Sandbox gates before GitHub discovery and re-reads live config on every poll. Disabling either gate, a prerequisite, or the allowlist stops future polling. The dispatcher constructs its Worker with workerEnabled=false; a dedicated task can execute only through the Sandbox runner.
+
+**Do not enable an execution gate or start automatic intake yet.** Settings can prepare provider/runtime configuration and trusted repositories, and can switch gates off. The Settings API rejects attempts to switch workerEnabled, sandboxExecutionEnabled, or githubIntakeEnabled on until a real Sandbox guest verification/attestation path exists and has passed. Do not edit the config file manually to bypass this restriction.
+
+Once that release prerequisite exists, the intended workflow is an explicit operator activation followed by an explicit Start automatic intake action. From then on eligible kilo:ready Issues are processed automatically; there is no per-Issue Run button.
+
+Stop prevents new polling ticks; it does not forcibly terminate an execution already running. Allow it to finish and reconcile its durable claim before restarting.
+
+## Current verification
+
+Windows CI run 44431059408, commit d654e5f18c6e99ce136c613da727915cb21b7b17, passed dependency installation, source/test TypeScript checking, build, and the full test suite: **295 tests, 290 passed, 0 failed, 5 skipped**.
+
+This result is code-level CI evidence. It does not demonstrate that the generalized runner completed a real task inside the operator's Windows Sandbox guest or that the browser has been visually accepted on the operator's machine.
 
 ## Troubleshooting
 
-### Browser displays an authentication error
+### Authentication or origin error
 
-Confirm the server is running in the terminal and use the exact loopback URL it printed, including its port. The Host and Origin checks intentionally reject alternate hostnames and remote access.
+Use the exact loopback URL printed by the Control Center, including its port. A different hostname or remote interface is intentionally rejected.
 
-### Setup token is lost
+### Lost setup token
 
-Before a password is configured, run `control-center setup` again to rotate the one-time token. Once an account is configured, this command refuses to reset it. Account recovery/reset tooling is not part of the current milestone; do not manually edit the authentication JSON.
+Before password configuration, run control-center setup again to rotate the one-time token. Once a password is configured, the setup command will not reset it. Account-recovery tooling is not currently available; do not manually edit the auth JSON.
 
-### Port is already in use
+### Intake cannot start
 
-Start the server on another local port, for example `control-center start 4191`.
+Inspect Settings and the intake status reason. Preconditions include both dedicated gates, GitHub/Kilo prerequisites, non-empty repository trust, exactly one active project mapping, allowed authors, GitHub authentication, Windows Sandbox readiness, a standalone executable, and valid provider settings.
 
-### Tasks or claims are missing
+### Task/claim missing or uncertain
 
-The Control Center reads the Bridge database under the selected `KILO_BRIDGE_ROOT`. Confirm that the same root is used by the CLI that registered the project or recorded the task. The server does not discover arbitrary GitHub repositories by browsing the UI.
+Confirm the same KILO_BRIDGE_ROOT is used by the operator CLI and Control Center. For RECONCILIATION_REQUIRED, inspect the claim, task, execution/evidence file, and matching GitHub Issue labels/comments. Never reset the task or replay a potentially started execution simply to clear the status.
 
-### Start automatic intake is disabled
-
-The intake gate or Sandbox execution gate is off, prerequisites are missing, the trusted repository allowlist is empty, or the Sandbox readiness check failed. Open the Settings and GitHub intake pages to inspect the reported reason. Do not switch gates on until a real generalized Sandbox guest execution has been verified on a disposable repository.
-
-## Verification
-
-Automated coverage is provided in `tests/control-center.test.ts` for bootstrap-token hashing/consumption, loopback binding, password/session setup, authentication, Origin/CSRF controls, database-backed read models, path omission, fail-closed automation gates, audited repository/polling settings, audited project-state changes, authenticated SSE snapshot/change notifications, and authenticated intake Start/Stop controls. The current Windows CI run `44425572765` passed the build and full suite: 291 tests, 286 passed, 0 failed, 5 skipped. This is code-level CI evidence, not a real guest-runtime result.
+See Windows Sandbox Task Execution, Recovery & Troubleshooting, and the implementation tracker.
