@@ -533,6 +533,11 @@ export class ControlCenterServer {
       return;
     }
     if (route === "/api/sandbox/attestation/verify" && method === "POST") {
+      const requestBody = await this.readJsonBody(request);
+      if (Object.keys(requestBody).length !== 0) {
+        this.sendJson(response, 400, { error: "Sandbox verification does not accept caller-supplied task or runtime parameters." });
+        return;
+      }
       const outcome = this.sandboxAttestation.startVerification();
       if (!outcome.ok) {
         this.sendJson(response, 409, {
