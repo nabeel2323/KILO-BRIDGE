@@ -568,6 +568,19 @@ test("control center: runtime attestation endpoint is session and CSRF protected
     assert.equal(noCsrf.status, 403);
     assert.equal(verificationStarts, 0);
 
+    const unexpectedPayload = await fetch(env.baseUrl + "api/sandbox/attestation/verify", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: origin,
+        Cookie: env.cookie,
+        "X-CSRF-Token": env.csrfToken,
+      },
+      body: JSON.stringify({ taskBody: "caller-controlled input" }),
+    });
+    assert.equal(unexpectedPayload.status, 400);
+    assert.equal(verificationStarts, 0);
+
     const start = await fetch(env.baseUrl + "api/sandbox/attestation/verify", {
       method: "POST",
       headers: {
