@@ -186,6 +186,9 @@ test("Sandbox attestation: successful disposable write creates a signed 24-hour 
     assert.equal(signedText.includes("KILO BRIDGE WINDOWS SANDBOX RUNTIME ATTESTATION"), false);
     assert.ok(env.store.listAudit().some((event) => event.action === "control_center.sandbox_runtime_attested"));
     assert.equal(fs.readdirSync(path.join(env.root, "data", "sandbox-runtime-verification")).length, 0);
+    const repeated = service.startVerification();
+    assert.equal(repeated.ok, false);
+    assert.equal(repeated.code, "SANDBOX_ATTESTATION_ALREADY_VALID");
   } finally {
     env.cleanup();
   }
