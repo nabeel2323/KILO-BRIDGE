@@ -308,6 +308,7 @@ export class SandboxRuntimeAttestationService {
     const runRoot = path.join(verificationRoot, executionId);
     const worktree = path.join(runRoot, "workspace");
     let cleanupOk = false;
+    let createdVerificationRoot = false;
     let result: SandboxTaskRunResult | null = null;
     let evidenceHash = "";
     let markerHash = "";
@@ -317,7 +318,9 @@ export class SandboxRuntimeAttestationService {
     try {
       fs.mkdirSync(verificationRoot, { recursive: true });
       if (fs.existsSync(runRoot)) throw new Error("Sandbox verification directory already exists");
-      fs.mkdirSync(worktree, { recursive: true, mode: 0o700 });
+      fs.mkdirSync(runRoot, { recursive: false, mode: 0o700 });
+      createdVerificationRoot = true;
+      fs.mkdirSync(worktree, { recursive: false, mode: 0o700 });
 
       const nonce = crypto.randomBytes(24).toString("base64url");
       markerContents = [
@@ -394,11 +397,15 @@ export class SandboxRuntimeAttestationService {
         throw new Error("A runtime component changed during the verification; attestation is not valid");
       }
     } finally {
-      try {
-        if (fs.existsSync(runRoot)) fs.rmSync(runRoot, { recursive: true, force: true });
-        cleanupOk = !fs.existsSync(runRoot);
-      } catch {
-        cleanupOk = false;
+      if (createdVerificationRoot) {
+        try {
+          if (fs.existsSync(runRoot)) fs.rmSync(runRoot, { recursive: true, force: true });
+          cleanupOk = !fs.existsSync(runRoot);
+        } catch {
+          cleanupOk = false;
+        }
+      } else {
+        cleanupOk = true;
       }
     }
 
