@@ -27,6 +27,7 @@ function validManifest(overrides: Record<string, unknown> = {}): Record<string, 
     "kilo-launcher-found",
     "kilo-config-found",
     "provider-script-found",
+    "provider-responses-accessible",
     "provider-started",
     "provider-health",
     "kilo-started",
@@ -158,8 +159,9 @@ test("sandbox runner: dedicated gate defaults off and prevents any execution sta
 test("sandbox runner: WSB logon command uses the guest-mapped bootstrap path and escapes host paths once", () => {
   const hostInbox = "C:\\Bridge\\Sandbox Runs\\inbox & tools";
   const hostOutbox = "C:\\Bridge\\Sandbox Runs\\outbox";
+  const hostResponses = "C:\\Bridge\\Sandbox Runs\\responses";
   const hostBootstrap = hostInbox + "\\bootstrap.ps1";
-  const xml = buildWsb(hostInbox, hostOutbox, hostBootstrap, EXECUTION_ID, 60_000);
+  const xml = buildWsb(hostInbox, hostOutbox, hostResponses, hostBootstrap, EXECUTION_ID, 60_000);
 
   assert.match(
     xml,
@@ -168,8 +170,9 @@ test("sandbox runner: WSB logon command uses the guest-mapped bootstrap path and
   assert.doesNotMatch(xml, /-File &quot;C:\\Bridge\\Sandbox Runs/);
   assert.match(xml, /<HostFolder>C:\\Bridge\\Sandbox Runs\\inbox &amp; tools<\/HostFolder>/);
   assert.doesNotMatch(xml, /&amp;amp;/);
+  assert.match(xml, /<HostFolder>C:\\Bridge\\Sandbox Runs\\responses<\\/HostFolder><SandboxFolder>C:\\Users\\WDAGUtilityAccount\\Desktop\\BridgeProviderResponses<\\/SandboxFolder><ReadOnly>true<\\/ReadOnly>/);
   assert.throws(
-    () => buildWsb(hostInbox, hostOutbox, hostInbox + "\\wrong.ps1", EXECUTION_ID, 60_000),
+    () => buildWsb(hostInbox, hostOutbox, hostResponses, hostInbox + "\\wrong.ps1", EXECUTION_ID, 60_000),
     /bootstrap\.ps1/
   );
 });
@@ -177,6 +180,9 @@ test("sandbox runner: WSB logon command uses the guest-mapped bootstrap path and
 test("sandbox runner: generated provider relay is valid JavaScript and exposes only the expected protocol", () => {
   const source = buildGuestProviderBridge();
   assert.doesNotThrow(() => new vm.Script(source));
+  assert.match(source, /RESPONSE_BOX=process\.argv\[3\]/);
+  assert.match(source, /path\.join\(RESPONSE_BOX,/);
+  assert.doesNotMatch(source, /path\.join\(OUTBOX,"provider-response-/);
   assert.match(source, /\/health/);
   assert.match(source, /\/v1\/models/);
   assert.match(source, /\/v1\/chat\/completions/);
@@ -199,6 +205,7 @@ test("sandbox runner: generated guest bootstrap parses and WSB XML preserves net
       buildWsb(
         "C:\\Bridge\\Sandbox Runs\\inbox & tools",
         "C:\\Bridge\\Sandbox Runs\\outbox",
+        "C:\\Bridge\\Sandbox Runs\\provider-responses",
         "C:\\Bridge\\Sandbox Runs\\inbox & tools\\bootstrap.ps1",
         executionId,
         60_000
@@ -217,9 +224,10 @@ if ($errors.Count -gt 0) {
 [xml]$doc = Get-Content -LiteralPath $WsbPath -Raw
 if ($doc.Configuration.Networking -ne "Disable") { exit 12 }
 $folders = @($doc.Configuration.MappedFolders.MappedFolder)
-if ($folders.Count -ne 2) { exit 13 }
-if ($folders[0].ReadOnly -ne "true" -or $folders[1].ReadOnly -ne "false") { exit 14 }
-if (-not $doc.Configuration.LogonCommand.Command) { exit 15 }
+if ($folders.Count -ne 3) { exit 13 }
+if ($folders[0].ReadOnly -ne "true" -or $folders[1].ReadOnly -ne "false" -or $folders[2].ReadOnly -ne "true") { exit 14 }
+if ($doc.Configuration.LogonCommand.Command -notmatch '-File "C:\\Users\\WDAGUtilityAccount\\Desktop\\BridgeInbox\\bootstrap.ps1"') { exit 15 }
+if ($doc.Configuration.LogonCommand.Command -notmatch '-ResponseBox "C:\\Users\\WDAGUtilityAccount\\Desktop\\BridgeProviderResponses"') { exit 16 }
 exit 0
 `, "utf8");
 
