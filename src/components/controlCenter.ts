@@ -921,11 +921,15 @@ export class ControlCenterServer {
           return;
         }
         const prerequisites = {
-          ghEnabled: body.ghEnabled === true || current.ghEnabled,
-          kiloEnabled: body.kiloEnabled === true || current.kiloEnabled,
+          ghEnabled: "ghEnabled" in body ? body.ghEnabled === true : current.ghEnabled,
+          kiloEnabled: "kiloEnabled" in body ? body.kiloEnabled === true : current.kiloEnabled,
         };
+        const trustedRepositories = "githubIntakeAllowedRepositories" in body &&
+          Array.isArray(body.githubIntakeAllowedRepositories)
+          ? body.githubIntakeAllowedRepositories
+          : current.githubIntakeAllowedRepositories;
         if (!prerequisites.ghEnabled || !prerequisites.kiloEnabled ||
-            current.githubIntakeAllowedRepositories.length === 0) {
+            trustedRepositories.length === 0) {
           this.sendJson(response, 409, {
             error: "GitHub and Kilo prerequisites must be enabled and at least one trusted repository must be configured before intake activation.",
             code: "INTAKE_PREREQUISITES_INCOMPLETE",
