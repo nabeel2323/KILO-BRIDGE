@@ -311,7 +311,7 @@ test("Sandbox attestation: a separate Bridge process holding the intake poll loc
     'const lock = new ExclusiveProcessLock(process.argv[2], "github-intake:child-process");',
     'const result = lock.acquire();',
     'if (!result.ok) { process.stderr.write(result.error || "lock failed"); process.exit(2); }',
-    'process.stdout.write("LOCKED\\\\n");',
+    'process.stdout.write("LOCKED\\n");',
     'process.stdin.once("data", () => { lock.release(); process.exit(0); });',
   ].join("\\n");
   const child = spawn(process.execPath, ["-e", childProgram, lockModulePath, lockPath], {
@@ -347,7 +347,7 @@ test("Sandbox attestation: a separate Bridge process holding the intake poll loc
     assert.equal(ensureBridgeConfig(env.root).githubIntakeEnabled, false);
     assert.equal(ensureBridgeConfig(env.root).sandboxExecutionEnabled, false);
 
-    child.stdin.write("release\\n");
+    child.stdin.write("release\n");
     const childExit = await new Promise<number | null>((resolve, reject) => {
       child.once("error", reject);
       child.once("exit", (code) => resolve(code));
@@ -359,7 +359,7 @@ test("Sandbox attestation: a separate Bridge process holding the intake poll loc
     const status = await waitForTerminal(service);
     assert.equal(status.state, "VALID");
   } finally {
-    try { child.stdin.write("release\\\\n"); } catch { /* child may already have exited */ }
+    try { child.stdin.write("release\n"); } catch { /* child may already have exited */ }
     if (child.exitCode === null) {
       await new Promise<void>((resolve) => {
         child.once("exit", () => resolve());
