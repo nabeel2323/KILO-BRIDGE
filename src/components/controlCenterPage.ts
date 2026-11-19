@@ -252,17 +252,72 @@ button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);bac
     byId("content").innerHTML='<div class="section-head"><h2>Audit history</h2><span class="muted">Sensitive detail fields are not exposed</span></div>'+renderTable(["Time","Action","Actor","Project"],rows,"No audit events recorded.");
   }
   async function renderSettings(){
-    var d=await api("/api/settings");var g=d.gates;var s=d.sandbox||{};
+    var d=await api("/api/settings");var g=d.gates;var s=d.sandbox||{};var att=d.runtimeAttestation||{};
     var repositories=(g.githubIntakeAllowedRepositories||[]).join("\n");
-    var html='<div class="notice">Configure the GitHub and Sandbox prerequisites here. The API-key value is never requested or stored by the Control Center; provision it as an environment variable for the Bridge process. Execution gates remain disabled until a real Windows Sandbox guest acceptance has been completed.</div>';
+    var attestationStatus=String(att.state||"NOT_ATTESTED").toUpperCase();
+    var html='<div class="notice">The one-time runtime verification runs a harmless task in a disposable Bridge-owned folder. It does not process a GitHub Issue, use a registered project, or enable any automation gate. The provider API-key value remains in the Bridge process environment and is never submitted to this page.</div>';
     html+='<div class="detail-grid">';
-    html+='<div class="card"><h2>GitHub intake</h2><div class="kv"><span>Intake gate</span>'+badge(g.githubIntakeEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Sandbox execution gate</span>'+badge(g.sandboxExecutionEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Runtime available</span>'+badge(d.intakeRuntimeAvailable?"YES":"NO")+'</div><div class="kv"><span>Runtime status</span><span class="muted">'+esc(d.intakeRuntimeReason||"Not ready")+'</span></div><div class="field"><label for="trusted-repositories">Trusted repositories (one owner/repo per line)</label><textarea id="trusted-repositories" rows="5" style="width:100%;border:1px solid var(--line);background:#0a1324;color:var(--text);border-radius:9px;padding:11px">'+esc(repositories)+'</textarea></div><div class="field"><label for="poll-interval">Polling interval in milliseconds (1,000–3,600,000)</label><input id="poll-interval" type="number" min="1000" max="3600000" step="1000" value="'+esc(d.pollIntervalMs)+'"></div><button id="save-intake-settings" class="primary">Save repository and polling settings</button></div>';
-    html+='<div class="card"><h2>Sandbox runtime</h2><div class="kv"><span>Standalone Kilo executable</span>'+badge(s.kiloExecutableConfigured?"CONFIGURED":"MISSING")+'</div><div class="kv"><span>Configured executable</span><span class="muted">'+esc(s.kiloExecutableName||"Not configured")+'</span></div><div class="kv"><span>Provider API key</span>'+badge(s.providerApiKeyPresent?"AVAILABLE":"NOT DETECTED")+'</div><div class="field"><label for="sandbox-kilo-exe">Standalone kilo.exe absolute path</label><input id="sandbox-kilo-exe" type="text" value="" placeholder="'+esc(s.kiloExecutableName?"Currently configured: "+s.kiloExecutableName:"C:\\\\Path\\\\To\\\\kilo.exe")+'"><label><input id="sandbox-kilo-exe-clear" type="checkbox"> Clear custom path and use KILO_SANDBOX_EXE</label></div><div class="field"><label for="sandbox-provider-url">OpenAI-compatible provider base URL</label><input id="sandbox-provider-url" type="url" value="'+esc(s.providerBaseUrl||"")+'" placeholder="https://provider.example/v1"></div><div class="field"><label for="sandbox-provider-model">Upstream provider model ID</label><input id="sandbox-provider-model" type="text" value="'+esc(s.providerModelId||"")+'" placeholder="model-name"></div><div class="field"><label for="sandbox-api-env">API key environment variable name</label><input id="sandbox-api-env" type="text" value="'+esc(s.providerApiKeyEnv||"")+'" placeholder="KILO_BRIDGE_PROVIDER_API_KEY"></div><p class="muted">Set the variable value in the Windows environment before starting the Bridge. The secret itself is never submitted to this page or saved in bridge.config.json. Restart the Bridge process after changing the environment value.</p><div class="field"><label for="sandbox-api-header">API key header</label><input id="sandbox-api-header" type="text" value="'+esc(s.providerApiKeyHeader||"Authorization")+'"></div><div class="field"><label for="sandbox-api-prefix">API key prefix</label><input id="sandbox-api-prefix" type="text" value="'+esc(s.providerApiKeyPrefix||"Bearer ")+'"></div><div class="field"><label><input id="gh-enabled" type="checkbox" '+(g.ghEnabled?"checked":"")+'> GitHub integration prerequisite enabled</label></div><div class="field"><label><input id="kilo-enabled" type="checkbox" '+(g.kiloEnabled?"checked":"")+'> Kilo integration prerequisite enabled</label></div><button id="save-sandbox-settings" class="primary">Save Sandbox and prerequisite settings</button></div>';
-    html+='<div class="card"><h2>Execution safeguards</h2><div class="kv"><span>Generic worker</span>'+badge(g.workerEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Dedicated GitHub intake</span>'+badge(g.githubIntakeEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Windows Sandbox runner</span>'+badge(g.sandboxExecutionEnabled?"ENABLED":"DISABLED")+'</div><p class="muted">This page can configure prerequisites and turn automation off. It cannot enable an execution gate before the real guest-runtime release acceptance. The dedicated intake never falls back to host Kilo.</p><button id="disable-automation">Keep all execution gates disabled</button></div></div><div id="settings-message" class="footer"></div>';
+    html+='<div class="card"><h2>Runtime attestation</h2><div class="kv"><span>Attestation status</span>'+badge(attestationStatus)+'</div><div class="kv"><span>Reason</span><span class="muted">'+esc(att.reason||"No attestation has been recorded.")+'</span></div><div class="kv"><span>Verified Kilo</span><span>'+esc(att.kiloVersion||"—")+'</span></div><div class="kv"><span>Windows Sandbox</span><span>'+esc(att.sandboxVersion||"—")+'</span></div><div class="kv"><span>Provider model</span><span>'+esc(att.providerModelId||"—")+'</span></div><div class="kv"><span>API key variable</span><span>'+esc(att.providerApiKeyEnvironmentName||"—")+' · '+badge(att.providerApiKeyPresent?"AVAILABLE":"NOT DETECTED")+'</span></div><div class="kv"><span>Provider requests</span><span>'+esc(att.providerRequests===undefined?"—":att.providerRequests)+'</span></div><div class="kv"><span>Native tool</span><span>'+esc(att.verifiedTool||"—")+'</span></div><div class="kv"><span>Attested at</span><span>'+esc(att.attestedAt||"—")+'</span></div><div class="kv"><span>Expires at</span><span>'+esc(att.expiresAt||"—")+'</span></div><div class="kv"><span>Marker SHA-256</span><span class="muted" style="overflow-wrap:anywhere">'+esc(att.markerSha256||"—")+'</span></div>';
+    if(att.state!=="RUNNING"){
+      html+='<button id="run-sandbox-attestation" class="primary">Run one-time Sandbox verification</button>';
+    }else{
+      html+='<button disabled>Sandbox verification running…</button>';
+    }
+    html+='<p class="muted">A successful attestation expires after 24 hours and is invalidated by a change to Kilo, Windows Sandbox, provider settings, API-key environment presence, Node, or the runner contract.</p></div>';
+    html+='<div class="card"><h2>GitHub intake</h2><div class="kv"><span>Intake gate</span>'+badge(g.githubIntakeEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Sandbox execution gate</span>'+badge(g.sandboxExecutionEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Dispatcher prerequisites</span>'+badge(d.intakeRuntimeAvailable?"READY":"NOT READY")+'</div><div class="kv"><span>Runtime status</span><span class="muted">'+esc(d.intakeRuntimeReason||"Ready for operator review")+'</span></div><div class="field"><label for="trusted-repositories">Trusted repositories (one owner/repo per line)</label><textarea id="trusted-repositories" rows="5" style="width:100%;border:1px solid var(--line);background:#0a1324;color:var(--text);border-radius:9px;padding:11px">'+esc(repositories)+'</textarea></div><div class="field"><label for="poll-interval">Polling interval in milliseconds (1,000–3,600,000)</label><input id="poll-interval" type="number" min="1000" max="3600000" step="1000" value="'+esc(d.pollIntervalMs)+'"></div><button id="save-intake-settings" class="primary">Save repository and polling settings</button>';
+    if(att.valid && !g.sandboxExecutionEnabled){
+      html+='<div class="field"><button id="enable-sandbox-gate">Enable Windows Sandbox execution</button></div>';
+    }
+    if(att.valid && g.sandboxExecutionEnabled && !g.githubIntakeEnabled &&
+       g.ghEnabled && g.kiloEnabled && (g.githubIntakeAllowedRepositories||[]).length>0 && d.intakeRuntimeAvailable){
+      html+='<div class="field"><button id="enable-intake-gate">Enable dedicated GitHub intake</button></div>';
+    }
+    if(g.githubIntakeEnabled){
+      html+='<div class="field"><p class="muted">Dedicated intake is enabled as a configuration gate. Use the GitHub intake panel to explicitly Start or Stop polling; enabling the gate does not start it automatically.</p></div>';
+    }
+    html+='</div>';
+    html+='<div class="card"><h2>Sandbox runtime prerequisites</h2><div class="kv"><span>Standalone Kilo executable</span>'+badge(s.kiloExecutableConfigured?"CONFIGURED":"MISSING")+'</div><div class="kv"><span>Configured executable</span><span class="muted">'+esc(s.kiloExecutableName||"Not configured")+'</span></div><div class="kv"><span>Provider API key</span>'+badge(s.providerApiKeyPresent?"AVAILABLE":"NOT DETECTED")+'</div><div class="field"><label for="sandbox-kilo-exe">Standalone kilo.exe absolute path</label><input id="sandbox-kilo-exe" type="text" value="" placeholder="'+esc(s.kiloExecutableName?"Currently configured: "+s.kiloExecutableName:"C:\\\\Path\\\\To\\\\kilo.exe")+'"><label><input id="sandbox-kilo-exe-clear" type="checkbox"> Clear custom path and use KILO_SANDBOX_EXE</label></div><div class="field"><label for="sandbox-provider-url">OpenAI-compatible provider base URL</label><input id="sandbox-provider-url" type="url" value="'+esc(s.providerBaseUrl||"")+'" placeholder="https://provider.example/v1"></div><div class="field"><label for="sandbox-provider-model">Upstream provider model ID</label><input id="sandbox-provider-model" type="text" value="'+esc(s.providerModelId||"")+'" placeholder="model-name"></div><div class="field"><label for="sandbox-api-env">API key environment variable name</label><input id="sandbox-api-env" type="text" value="'+esc(s.providerApiKeyEnv||"")+'" placeholder="KILO_BRIDGE_PROVIDER_API_KEY"></div><p class="muted">Set the variable value in the Windows environment before starting the Bridge. The secret itself is never submitted to this page or saved in bridge.config.json. Restart the Bridge process after changing the environment value.</p><div class="field"><label for="sandbox-api-header">API key header</label><input id="sandbox-api-header" type="text" value="'+esc(s.providerApiKeyHeader||"Authorization")+'"></div><div class="field"><label for="sandbox-api-prefix">API key prefix</label><input id="sandbox-api-prefix" type="text" value="'+esc(s.providerApiKeyPrefix||"Bearer ")+'"></div><div class="field"><label><input id="gh-enabled" type="checkbox" '+(g.ghEnabled?"checked":"")+'> GitHub integration prerequisite enabled</label></div><div class="field"><label><input id="kilo-enabled" type="checkbox" '+(g.kiloEnabled?"checked":"")+'> Kilo integration prerequisite enabled</label></div><button id="save-sandbox-settings" class="primary">Save Sandbox and prerequisite settings</button></div>';
+    html+='<div class="card"><h2>Execution safeguards</h2><div class="kv"><span>Generic worker</span>'+badge(g.workerEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Dedicated GitHub intake</span>'+badge(g.githubIntakeEnabled?"ENABLED":"DISABLED")+'</div><div class="kv"><span>Windows Sandbox runner</span>'+badge(g.sandboxExecutionEnabled?"ENABLED":"DISABLED")+'</div><p class="muted">The legacy generic worker cannot be enabled from this workflow. Dedicated intake is separate, claim-bound, and never falls back to host Kilo.</p><button id="disable-automation">Keep all execution gates disabled</button></div></div><div id="settings-message" class="footer"></div>';
     byId("content").innerHTML=html;
+    if(byId("run-sandbox-attestation")){
+      byId("run-sandbox-attestation").addEventListener("click",async function(){
+        try{
+          var started=await api("/api/sandbox/attestation/verify",{method:"POST",body:"{}"});
+          byId("settings-message").textContent="Disposable Sandbox verification started. It does not process GitHub work.";
+          for(var attempt=0;attempt<220;attempt++){
+            await new Promise(function(resolve){setTimeout(resolve,3000);});
+            var status=await api("/api/sandbox/attestation");
+            if(status.state!=="RUNNING"){
+              await renderSettings();
+              byId("settings-message").textContent=status.valid?"Sandbox runtime attestation succeeded and is valid for 24 hours.":"Sandbox runtime verification ended: "+(status.reason||status.state);
+              return;
+            }
+          }
+          byId("settings-message").textContent="Verification is still running. Refresh Settings to inspect its current status.";
+        }catch(error){byId("settings-message").textContent=error.message||String(error);}
+      });
+    }
+    if(byId("enable-sandbox-gate")){
+      byId("enable-sandbox-gate").addEventListener("click",async function(){
+        try{
+          await api("/api/settings",{method:"POST",body:JSON.stringify({sandboxExecutionEnabled:true})});
+          await renderSettings();
+          byId("settings-message").textContent="Windows Sandbox execution gate enabled. GitHub intake remains disabled.";
+        }catch(error){byId("settings-message").textContent=error.message||String(error);}
+      });
+    }
+    if(byId("enable-intake-gate")){
+      byId("enable-intake-gate").addEventListener("click",async function(){
+        try{
+          await api("/api/settings",{method:"POST",body:JSON.stringify({githubIntakeEnabled:true})});
+          await renderSettings();
+          byId("settings-message").textContent="Dedicated GitHub intake gate enabled. Polling has not started; use the intake Start control explicitly.";
+        }catch(error){byId("settings-message").textContent=error.message||String(error);}
+      });
+    }
     byId("save-intake-settings").addEventListener("click",async function(){
       try{
-        var repos=byId("trusted-repositories").value.split(/\r?\n/).map(function(x){return x.trim();}).filter(Boolean);
+        var repos=byId("trusted-repositories").value.split(/\\r?\\n/).map(function(x){return x.trim();}).filter(Boolean);
         var interval=Number(byId("poll-interval").value);
         await api("/api/settings",{method:"POST",body:JSON.stringify({githubIntakeAllowedRepositories:repos,pollIntervalMs:interval})});
         await renderSettings();
