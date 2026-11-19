@@ -12,7 +12,7 @@ import {
   type SandboxTaskRunResult,
 } from "./windowsSandboxTaskRunner";
 
-const ATTESTATION_VERSION = 1;
+const ATTESTATION_VERSION = 2;
 const ATTESTATION_TTL_MS = 24 * 60 * 60 * 1000;
 const VERIFICATION_TIMEOUT_MS = 10 * 60 * 1000;
 const MARKER_NAME = "KILO_BRIDGE_RUNTIME_ATTESTATION.txt";
@@ -52,12 +52,18 @@ interface AttestationEvidence {
   runnerEvidenceSha256: string;
 }
 
+interface AttestationRuntimeIdentity extends SandboxRuntimeIdentity {
+  // HMAC of the provider API-key value using the local attestation key.
+  // The credential itself is never persisted or returned to the UI.
+  providerCredentialBinding: string;
+}
+
 interface AttestationPayload {
   version: number;
   executionId: string;
   attestedAt: string;
   expiresAt: string;
-  runtimeIdentity: SandboxRuntimeIdentity;
+  runtimeIdentity: AttestationRuntimeIdentity;
   evidence: AttestationEvidence;
 }
 
@@ -247,7 +253,7 @@ export class SandboxRuntimeAttestationService {
           reason: readiness.reasons.slice(0, 5).join("; ") || "Sandbox runtime is not ready.",
         };
       }
-      const currentIdentity = runner.runtimeIdentity();
+      const currentIdentity = this.bindRuntimeIdentity(runner.runtimeIdentity());
       if (currentIdentity.fingerprint !== payload.runtimeIdentity.fingerprint) {
         return {
           ...metadata,
@@ -387,6 +393,36 @@ export class SandboxRuntimeAttestationService {
     });
   }
 
+  /**
+   * Bind the active provider credential without persisting it or a plain hash.
+   * The local signing key provides a keyed HMAC so credential rotation is
+   * observable, while offline copies of the attestation do not reveal the key.
+   */
+  private bindRuntimeIdentity(identity: SandboxRuntimeIdentity): AttestationRuntimeIdentity {
+    const key = this.readSigningKey(true);
+    if (!key || key.length !== 32) {
+      throw new Error("Could not read the local key required to bind the provider credential");
+    }
+
+    const environmentName = identity.apiKeyEnvironmentName ?? "";
+    const providerCredential = environmentName ? process.env[environmentName] ?? "" : "";
+    const credentialPresent = Boolean(providerCredential);
+    if (credentialPresent !== identity.apiKeyPresent) {
+      throw new Error("Provider API-key availability changed while binding the runtime identity");
+    }
+
+    const providerCredentialBinding = crypto.createHmac("sha256", key)
+      .update("kilo-bridge-provider-credential-binding:v1\\0", "utf8")
+      .update(providerCredential, "utf8")
+      .digest("hex");
+    const { fingerprint: _baseFingerprint, ...runtimeFields } = identity;
+    const boundFields = { ...runtimeFields, providerCredentialBinding };
+    return {
+      ...boundFields,
+      fingerprint: sha256(canonicalize(boundFields)),
+    };
+  }
+
   private async executeVerification(config: BridgeConfig, startedAt: string): Promise<void> {
     const executionId = crypto.randomUUID();
     const temporaryConfig = this.temporaryRunnerConfig(config);
@@ -395,7 +431,7 @@ export class SandboxRuntimeAttestationService {
     if (!readiness.ready) {
       throw new Error(readiness.reasons.slice(0, 8).join("; ") || "Windows Sandbox runtime is not ready.");
     }
-    const identityBefore = runner.runtimeIdentity();
+    const identityBefore = this.bindRuntimeIdentity(runner.runtimeIdentity());
 
     const verificationRoot = path.join(this.dataRoot, "sandbox-runtime-verification");
     const runRoot = path.join(verificationRoot, executionId);
@@ -522,7 +558,7 @@ export class SandboxRuntimeAttestationService {
     if (!finalReadiness.ready) {
       throw new Error("Sandbox readiness changed during verification: " + finalReadiness.reasons.slice(0, 5).join("; "));
     }
-    const identityAfter = finalRunner.runtimeIdentity();
+    const identityAfter = this.bindRuntimeIdentity(finalRunner.runtimeIdentity());
     if (identityAfter.fingerprint !== identityBefore.fingerprint) {
       throw new Error("A runtime-bound executable or provider setting changed during verification; attestation is not valid");
     }
@@ -608,6 +644,7 @@ export class SandboxRuntimeAttestationService {
       }
       if (value.payload.version !== ATTESTATION_VERSION || typeof value.payload.executionId !== "string" ||
           typeof value.payload.expiresAt !== "string" || !value.payload.runtimeIdentity?.fingerprint ||
+          !/^[a-f0-9]{64}$/i.test(value.payload.runtimeIdentity.providerCredentialBinding ?? "") ||
           !value.payload.evidence?.markerSha256) {
         return { ok: false, reason: "The local attestation payload is incomplete; retest is required." };
       }
