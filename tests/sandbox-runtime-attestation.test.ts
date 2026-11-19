@@ -148,6 +148,8 @@ async function waitForTerminal(service: SandboxRuntimeAttestationService) {
 }
 
 async function openEnvironment() {
+  const previousProviderKey = process.env.KILO_TEST_PROVIDER_KEY;
+  process.env.KILO_TEST_PROVIDER_KEY = "test-provider-key-one";
   const root = makeTempDir("sandbox-attestation-");
   ensureBridgeConfig(root);
   const store = new SqliteStore(path.join(root, "data", "test.sqlite"));
@@ -158,6 +160,8 @@ async function openEnvironment() {
     cleanup() {
       store.close();
       removeDir(root);
+      if (previousProviderKey === undefined) delete process.env.KILO_TEST_PROVIDER_KEY;
+      else process.env.KILO_TEST_PROVIDER_KEY = previousProviderKey;
     },
   };
 }
@@ -192,6 +196,8 @@ test("Sandbox attestation: successful disposable write creates a signed 24-hour 
     const signedText = fs.readFileSync(signedPath, "utf8");
     assert.equal(signedText.includes("nonce="), false);
     assert.equal(signedText.includes("KILO BRIDGE WINDOWS SANDBOX RUNTIME ATTESTATION"), false);
+    assert.equal(signedText.includes("test-provider-key-one"), false);
+    assert.match(signedText, /providerCredentialBinding/);
     assert.ok(env.store.listAudit().some((event) => event.action === "control_center.sandbox_runtime_attested"));
     assert.equal(fs.readdirSync(path.join(env.root, "data", "sandbox-runtime-verification")).length, 0);
     const repeated = service.startVerification();
@@ -445,6 +451,36 @@ test("Sandbox attestation: shared config writer lock is held until guest cleanup
     assert.equal(updated.pollIntervalMs, 45000);
   } finally {
     releaseRun();
+    env.cleanup();
+  }
+});
+
+
+test("Sandbox attestation: provider API-key rotation invalidates proof without persisting the credential", async () => {
+  const env = await openEnvironment();
+  try {
+    const service = await createService({
+      root: env.root,
+      store: env.store,
+      identity: () => makeIdentity(),
+    });
+    assert.equal(service.startVerification().ok, true);
+    const attested = await waitForTerminal(service);
+    assert.equal(attested.state, "VALID");
+    assert.equal(attested.valid, true);
+
+    const signedPath = path.join(env.root, "data", "sandbox-runtime-attestation.json");
+    const signedText = fs.readFileSync(signedPath, "utf8");
+    assert.equal(signedText.includes("test-provider-key-one"), false);
+    assert.match(signedText, /providerCredentialBinding/);
+
+    process.env.KILO_TEST_PROVIDER_KEY = "test-provider-key-two";
+    const rotated = service.status();
+    assert.equal(rotated.state, "NEEDS_RETEST");
+    assert.equal(rotated.valid, false);
+    assert.match(rotated.reason || "", /runtime component or provider setting changed/i);
+    assert.equal(signedText.includes("test-provider-key-two"), false);
+  } finally {
     env.cleanup();
   }
 });
