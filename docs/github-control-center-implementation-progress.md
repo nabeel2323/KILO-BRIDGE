@@ -1,7 +1,7 @@
 # GitHub Control Center and Isolated Intake — Progress Tracker
 
 **Tracker version:** 2.0  
-**Status:** SOURCE INTEGRATION IMPLEMENTED; WINDOWS CI GREEN; REAL GUEST ACCEPTANCE PENDING  
+**Status:** ATTESTATION WORKFLOW SOURCE + TESTS COMMITTED; CURRENT CI AND REAL GUEST ACCEPTANCE PENDING  
 **Repository:** nabeel2323/KILO-BRIDGE  
 **Branch:** v1-implementation  
 **Implementation baseline reviewed:** d654e5f18c6e99ce136c613da727915cb21b7b17  
@@ -22,10 +22,10 @@
 | Generalized Windows Sandbox runner | Implemented with fail-closed checks | Windows CI green | Real guest task not yet verified |
 | Control Center backend/security | Implemented | Windows CI green | Local browser acceptance pending |
 | Control Center settings UI | Implemented | Windows CI green | Local browser acceptance pending |
-| Operator runtime verification/attestation workflow | Not implemented | Not applicable | Blocking next release gate |
-| Documentation synchronization | Updated in this commit | Not yet included in CI | Pending documentation commit |
+| Operator runtime verification/attestation workflow | Implemented in source; real run pending | Regression tests committed; latest CI pending | Blocking until operator-hosted verification succeeds |
+| Documentation synchronization | Updated for attestation workflow | Current docs commit not yet included in verified CI | Operator/browser acceptance pending |
 
-The latest verified Windows CI run reports **295 tests, 290 passed, 0 failed, and 5 skipped**. Skipped checks are environment-dependent and are not counted as runtime passes.
+The latest verified Windows CI run reports **295 tests, 290 passed, 0 failed, and 5 skipped** on commit `d654e5f18c6e99ce136c613da727915cb21b7b17`. This run predates the attestation service, dispatcher enforcement, staged-gate API/UI, and the new attestation regression cases. The latest branch commit is `b09f50cfa1dc651d757b1027f48ef1f0aa4fe107`; no current status checks were returned for it by the connected status endpoint. Do not treat the older 295-test run as verification of the latest source. Skipped checks are environment-dependent and are not counted as runtime passes.
 
 ## 2. Operational safety state
 
@@ -38,7 +38,7 @@ Fresh-install defaults remain:
 - kiloEnabled=false
 - githubIntakeAllowedRepositories=[]
 
-The Control Center can prepare provider/runtime settings and repository trust, and can disable gates. It rejects attempts to enable workerEnabled, githubIntakeEnabled, or sandboxExecutionEnabled until a real guest-runtime verification/attestation workflow exists. Do not edit the config manually to bypass the restriction.
+The Control Center can prepare provider/runtime settings and repository trust, run the one-time disposable guest verification, display a signed 24-hour attestation, and expose staged activation. It requires a current valid attestation before enabling sandboxExecutionEnabled; Github intake requires Sandbox already enabled, prerequisites and trust, and dispatcher readiness. The legacy workerEnabled gate remains blocked. The persistent defaults remain false, and no gate was enabled during implementation.
 
 No production GitHub Issue was processed as part of this implementation work. No pull request, merge, or deployment was performed.
 
@@ -49,10 +49,10 @@ No production GitHub Issue was processed as part of this implementation work. No
 | 0 | Repository boundary, safe defaults, worker isolation safeguards | COMPLETE — source + CI | None for this scoped work |
 | 1 | Configuration, schema-v5 claims, SQL.js concurrency protection | COMPLETE — source + CI | Operator DB runtime concurrency is not covered by hosted CI |
 | 2 | Dedicated GitHub discovery, eligibility, durable claims, live gates | COMPLETE — source + CI | Live intake remains deliberately disabled |
-| 3 | Claim-bound dispatcher, Sandbox execution contract, evidence and report lifecycle | PARTIAL — source + CI | Real guest task, runtime attestation, and recovery acceptance |
+| 3 | Claim-bound dispatcher, Sandbox execution contract, evidence and report lifecycle | PARTIAL — source + prior CI | Real guest task, successful attestation, and recovery acceptance |
 | 4 | Authenticated loopback Control Center backend and APIs | COMPLETE — source + CI | Local browser acceptance |
-| 5 | Control Center UI, configuration, SSE refresh, operator controls | COMPLETE — source + CI | Local browser acceptance and future gate-activation UX |
-| 6 | Integration hardening, tests, Windows CI | PARTIAL | Guest runtime and disposable-repository pilot |
+| 5 | Control Center UI, configuration, SSE refresh, operator controls | COMPLETE — source; latest CI pending | Local browser acceptance of attestation and staged activation UX |
+| 6 | Integration hardening, tests, Windows CI | PARTIAL | Latest branch CI, guest runtime, browser acceptance, disposable-repository pilot |
 | 7 | Architecture, execution, recovery, testing, operator documentation | IN PROGRESS | This documentation commit and continued synchronization |
 
 No overall percentage is published. A percentage would conceal the remaining guest-runtime and operator acceptance blockers.
@@ -119,20 +119,20 @@ Hosted Windows CI validates compilation/build, automated fixtures, generated pro
 
 ## 6. Remaining critical release work
 
-### 6.1 Operator-hosted runtime verification and attestation — BLOCKING
+### 6.1 Operator-hosted runtime verification and attestation — SOURCE IMPLEMENTED; OPERATOR RUN BLOCKING
 
-Implement a Control Center action for a one-time verification task that:
+The following source path is now implemented and regression tests are committed:
 
-1. Runs in a disposable Bridge-owned verification directory, not a registered project or GitHub repository.
-2. Uses the generalized runner with a temporary in-memory execution config; it does not persistently turn on the Sandbox or intake gate.
-3. Asks guest Kilo to create a harmless marker file in the disposable workspace.
-4. Requires a matching execution UUID, required guest/provider/Kilo stages, at least one native file-writing tool event, Kilo exit code zero, positive provider request count, valid marker SHA-256, and complete cleanup.
-5. Persists a bounded local attestation atomically, without secrets or prompts.
-6. Binds the attestation to the current Kilo executable hash, Windows Sandbox executable/version, provider URL/model, API-key environment-variable name/presence, and runner/config contract. A material change invalidates it.
-7. Exposes accepted/expired/needs-retest status in Settings and an explicit operator action to enable the Sandbox and then dedicated intake gates only when the attestation matches.
-8. Continues to reject enabling the legacy generic worker from the dedicated intake UI.
+1. `SandboxRuntimeAttestationService` uses a disposable Bridge-owned directory under `data/sandbox-runtime-verification`, never a registered project or GitHub repository.
+2. It uses a temporary in-memory config override with only `sandboxExecutionEnabled=true`; worker, intake, and persistent config values remain disabled.
+3. It asks guest Kilo to create an exact execution-ID/nonce marker through the native write tool.
+4. It requires a matching execution UUID, guest/provider/Kilo stage evidence, Kilo exit code zero, at least one provider request, native write-tool evidence, exact marker content, one matching artifact SHA-256/size declaration, the runner's bounded evidence file, and full cleanup of both verification and runner staging directories.
+5. It persists an HMAC-signed local attestation atomically, with a separately stored signing key, 24-hour expiry, and no prompt, nonce, provider request body, API-key value, or raw Kilo output.
+6. The attestation fingerprint binds the Kilo executable hash/version, Windows Sandbox executable hash/version, provider URL/model and non-secret auth configuration identity, Node/OS/architecture, and runner contract. Expiry, tampering, missing key, or runtime drift invalidates it.
+7. Authenticated Control Center routes expose status and start the one-time verification. Settings offers staged Sandbox then intake activation; enabling intake requires Sandbox already enabled, current attestation, GitHub/Kilo prerequisites, trusted repositories, and dispatcher readiness.
+8. The app shares the same attestation service with `SandboxGitHubIntakeDispatcher`; actual dispatcher readiness and dispatch fail closed when the attestation is missing, expired, or mismatched. The generic worker gate remains unavailable from this workflow.
 
-This feature has not been implemented. Until it exists and passes on the operator's actual machine, execution gates stay false.
+**Still blocking release:** run this verification on the operator's actual interactive Windows Sandbox, confirm status `VALID`, then perform local browser acceptance and only afterward conduct a disposable-repository GitHub pilot. Do not manually set any execution gate.
 
 ### 6.2 Disposable repository pilot
 
@@ -176,10 +176,14 @@ Documentation must distinguish code-level CI proof from guest runtime proof and 
 | Date | Commit / run | Change or evidence | Result |
 |---|---|---|---|
 | 2026-11-19 | d654e5f18c6e99ce136c613da727915cb21b7b17 | Corrected Sandbox WSB test to compare the guest-mapped bootstrap path literally. | Source/test committed |
+| 2026-11-19 | `5ee6673`, `89a27e8`, `d6d8acf` | Added non-secret runtime fingerprint, HMAC-signed 24-hour disposable Sandbox attestation service, failure-state reporting, and guaranteed cleanup. | SOURCE COMMITTED |
+| 2026-11-19 | `656db4f`, `49d66fc`, `faf9413`, `d8c70e6`, `16dae79`, `7cfac35` | Added authenticated attestation API, required current proof in the claim dispatcher, shared service instance through the app/Control Center, and separated runtime prerequisites from the intake-enabled gate. | SOURCE COMMITTED |
+| 2026-11-19 | `3acf7b5`, `81b86e8`, `cf07c7c`, `40e7f1c` | Added Settings verification status/action and staged gate controls; enforced Sandbox-first/intake-second dependency in the API; hid repeated verification while proof remains valid. | SOURCE COMMITTED |
+| 2026-11-19 | `3fe40da`, `8737003`, `7344f5f`, `b09f50c` | Added five attestation-service tests and two Control Center API/gate tests, including no-rerun while a proof is still valid and order-of-operations guard. | TEST SOURCE COMMITTED; EXECUTION PENDING |
 | 2026-11-19 | Windows CI 44431059408 | Dependency install, TypeScript, build, complete test suite. | PASS — 295 total, 290 passed, 0 failed, 5 skipped |
-| 2026-11-19 | Operator-hosted Windows Sandbox guest execution | Generalized runner with disposable marker task. | NOT YET RUN |
+| 2026-11-19 | Operator-hosted Windows Sandbox guest execution | Generalized runner with disposable marker task and signed attestation workflow. | NOT YET RUN — no operator runtime proof |
 | 2026-11-19 | Local browser acceptance | Operator browser walkthrough of Control Center. | NOT YET RUN |
-| 2026-11-19 | Disposable GitHub Issue pilot | End-to-end claim → guest → artifacts → verification → report. | BLOCKED on runtime attestation |
+| 2026-11-19 | Disposable GitHub Issue pilot | End-to-end claim → guest → artifacts → verification → report. | BLOCKED until operator attestation and browser acceptance |
 
 ## 9. Status definitions
 
