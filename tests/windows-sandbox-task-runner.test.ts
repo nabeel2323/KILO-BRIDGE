@@ -156,18 +156,22 @@ test("sandbox runner: dedicated gate defaults off and prevents any execution sta
 
 
 test("sandbox runner: WSB logon command uses the guest-mapped bootstrap path and escapes host paths once", () => {
-  const hostInbox = "C:\\\\Bridge\\\\Sandbox Runs\\\\inbox & tools";
-  const hostOutbox = "C:\\\\Bridge\\\\Sandbox Runs\\\\outbox";
-  const hostBootstrap = hostInbox + "\\\\bootstrap.ps1";
+  const hostInbox = "C:\\Bridge\\Sandbox Runs\\inbox & tools";
+  const hostOutbox = "C:\\Bridge\\Sandbox Runs\\outbox";
+  const hostBootstrap = hostInbox + "\\bootstrap.ps1";
   const xml = buildWsb(hostInbox, hostOutbox, hostBootstrap, EXECUTION_ID, 60_000);
 
   assert.match(
     xml,
-    /-File &quot;C:\\\\Users\\\\WDAGUtilityAccount\\\\Desktop\\\\BridgeInbox\\\\bootstrap\\.ps1&quot;/
+    /-File &quot;C:\\Users\\WDAGUtilityAccount\\Desktop\\BridgeInbox\\bootstrap\\.ps1&quot;/
   );
-  assert.doesNotMatch(xml, /-File &quot;C:\\\\Bridge\\\\Sandbox Runs/);
-  assert.match(xml, /<HostFolder>C:\\\\Bridge\\\\Sandbox Runs\\\\inbox &amp; tools<\\/HostFolder>/);
+  assert.doesNotMatch(xml, /-File &quot;C:\\Bridge\\Sandbox Runs/);
+  assert.match(xml, /<HostFolder>C:\\Bridge\\Sandbox Runs\\inbox &amp; tools<\\/HostFolder>/);
   assert.doesNotMatch(xml, /&amp;amp;/);
+  assert.throws(
+    () => buildWsb(hostInbox, hostOutbox, hostInbox + "\\wrong.ps1", EXECUTION_ID, 60_000),
+    /bootstrap\\.ps1/
+  );
 });
 
 test("sandbox runner: generated provider relay is valid JavaScript and exposes only the expected protocol", () => {
