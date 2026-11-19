@@ -61,7 +61,7 @@ Durable records include projects, tasks, transitions, executions, verifications,
 
 The Control Center binds to 127.0.0.1 only. It uses a one-time setup token, locally configured scrypt password, server-side expiring sessions, Host/Origin checks, CSRF protection, bounded request bodies, login throttling, CSP/security headers, and audited settings/project changes. Authenticated SSE is a change-notification mechanism; reconnecting clients reload an authoritative database-backed snapshot.
 
-The UI can prepare provider/repository settings and disable execution gates. It does not currently authorize enabling an execution gate. The missing release prerequisite is an operator-hosted real Sandbox guest verification/attestation flow, after which the gates may be unlocked through an explicit operator action.
+The UI can prepare provider/repository settings, show a signed runtime-attestation status, and expose staged execution-gate activation. The one-time verification uses an in-memory Sandbox gate override and a disposable Bridge-owned directory, and it writes a 24-hour HMAC-signed local attestation only after matching guest/provider/Kilo evidence, a native write-tool event, exact marker bytes/hash, and complete cleanup. The app and claim-bound dispatcher share the same attestation authority; an expired, tampered, missing, or runtime-mismatched attestation blocks dispatcher readiness. The operator must enable Sandbox first, then dedicated intake separately; starting intake remains a separate action. The legacy generic worker cannot be enabled through this workflow.
 
 ## Non-goals and current limitations
 
@@ -71,6 +71,6 @@ The UI can prepare provider/repository settings and disable execution gates. It 
 - No secret value is stored in Bridge configuration or sent to the Sandbox guest.
 - No automatic approval, publication, merge, or deployment from dedicated intake.
 - A green hosted CI run does not prove a real guest run on the operator's Windows machine.
-- The generalized runner has source/build/test coverage, but real guest execution and browser-level operator acceptance remain outstanding.
+- The attestation workflow and gate enforcement are now implemented in source with regression tests, but the real guest verification, latest-commit CI result, and local browser acceptance remain outstanding.
 
 See Windows Sandbox Execution, Control Center Operations, Windows Configuration, and the implementation progress tracker.
