@@ -672,6 +672,12 @@ test("control center: activation requires valid attestation and proceeds Sandbox
     assert.equal(intake.status, 200);
     assert.equal(ensureBridgeConfig(env.root).githubIntakeEnabled, true);
 
+    const reverseOrderBypass = await post({ sandboxExecutionEnabled: false, githubIntakeEnabled: true });
+    assert.equal(reverseOrderBypass.status, 409);
+    assert.equal((await reverseOrderBypass.json() as any).code, "SANDBOX_GATE_MUST_ALREADY_BE_ENABLED");
+    assert.equal(ensureBridgeConfig(env.root).sandboxExecutionEnabled, true);
+    assert.equal(ensureBridgeConfig(env.root).githubIntakeEnabled, true);
+
     const genericWorker = await post({ workerEnabled: true });
     assert.equal(genericWorker.status, 409);
     assert.equal(ensureBridgeConfig(env.root).workerEnabled, false);
