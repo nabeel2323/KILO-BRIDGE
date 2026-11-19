@@ -196,7 +196,7 @@ test("control center: settings remain read-only and do not expose secrets or ena
         Cookie: env.cookie,
         "X-CSRF-Token": env.csrfToken,
       },
-      body: JSON.stringify({ githubIntakeEnabled: true, workerEnabled: true }),
+      body: JSON.stringify({ githubIntakeEnabled: true, workerEnabled: true, sandboxExecutionEnabled: true }),
     });
     assert.equal(mutation.status, 409);
     const config = JSON.parse(fs.readFileSync(path.join(env.root, "bridge.config.json"), "utf8"));
@@ -207,6 +207,71 @@ test("control center: settings remain read-only and do not expose secrets or ena
   }
 });
 
+
+test("control center: Sandbox provider settings are configurable without exposing secrets or local paths", async () => {
+  const env = await setupAuthenticatedServer();
+  const variableName = "KILO_BRIDGE_CONTROL_CENTER_TEST_KEY";
+  const previousValue = process.env[variableName];
+  process.env[variableName] = "test-secret-value-that-must-not-be-returned";
+  try {
+    const response = await fetch(env.baseUrl + "api/settings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: new URL(env.baseUrl).origin,
+        Cookie: env.cookie,
+        "X-CSRF-Token": env.csrfToken,
+      },
+      body: JSON.stringify({
+        sandboxKiloExePath: process.execPath,
+        sandboxProviderBaseUrl: "https://provider.example/v1",
+        sandboxProviderModelId: "test-model-id",
+        sandboxProviderApiKeyEnv: variableName,
+        sandboxProviderApiKeyHeader: "Authorization",
+        sandboxProviderApiKeyPrefix: "Bearer ",
+        ghEnabled: true,
+        kiloEnabled: true,
+      }),
+    });
+    assert.equal(response.status, 200);
+    const data = await response.json() as any;
+    assert.equal(data.sandbox.kiloExecutableConfigured, true);
+    assert.equal(data.sandbox.kiloExecutableName, path.win32.basename(process.execPath));
+    assert.equal(data.sandbox.providerBaseUrl, "https://provider.example/v1");
+    assert.equal(data.sandbox.providerModelId, "test-model-id");
+    assert.equal(data.sandbox.providerApiKeyEnv, variableName);
+    assert.equal(data.sandbox.providerApiKeyPresent, true);
+    assert.equal(data.gates.ghEnabled, true);
+    assert.equal(data.gates.kiloEnabled, true);
+    assert.equal(data.gates.sandboxExecutionEnabled, false);
+    assert.equal(JSON.stringify(data).includes("test-secret-value-that-must-not-be-returned"), false);
+    assert.equal(JSON.stringify(data).includes(process.execPath), false);
+
+    const persisted = JSON.parse(fs.readFileSync(path.join(env.root, "bridge.config.json"), "utf8"));
+    assert.equal(persisted.sandboxKiloExePath, process.execPath);
+    assert.equal(persisted.sandboxProviderApiKeyEnv, variableName);
+    assert.equal(persisted.sandboxProviderModelId, "test-model-id");
+    assert.equal(persisted.sandboxExecutionEnabled, false);
+
+    const invalidUrl = await fetch(env.baseUrl + "api/settings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: new URL(env.baseUrl).origin,
+        Cookie: env.cookie,
+        "X-CSRF-Token": env.csrfToken,
+      },
+      body: JSON.stringify({ sandboxProviderBaseUrl: "https://user:password@provider.example/v1?token=x" }),
+    });
+    assert.equal(invalidUrl.status, 400);
+    const afterInvalid = JSON.parse(fs.readFileSync(path.join(env.root, "bridge.config.json"), "utf8"));
+    assert.equal(afterInvalid.sandboxProviderBaseUrl, "https://provider.example/v1");
+  } finally {
+    if (previousValue === undefined) delete process.env[variableName];
+    else process.env[variableName] = previousValue;
+    await env.cleanup();
+  }
+});
 
 test("control center: trusted repositories and polling interval update atomically and are audited", async () => {
   const env = await setupAuthenticatedServer();
