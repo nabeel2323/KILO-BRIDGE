@@ -319,7 +319,7 @@ test("Sandbox attestation: a separate Bridge process holding the intake poll loc
     'if (!result.ok) { process.stderr.write(result.error || "lock failed"); process.exit(2); }',
     'process.stdout.write("LOCKED\\n");',
     'process.stdin.once("data", () => { lock.release(); process.exit(0); });',
-  ].join("\\n");
+  ].join("\n");
   const child = spawn(process.execPath, ["-e", childProgram, lockModulePath, lockPath], {
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
