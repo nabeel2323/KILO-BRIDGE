@@ -55,6 +55,7 @@ async function setup(opts: {
   issue?: GitHubIssue;
   dispatcherReady?: boolean;
   workerEnabled?: boolean;
+  sandboxExecutionEnabled?: boolean;
 } = {}) {
   const root = makeTempDir("kilo-intake-");
   const store = new SqliteStore(path.join(root, "data", "bridge.sqlite"));
@@ -87,10 +88,11 @@ async function setup(opts: {
   };
   const config: Pick<BridgeConfig,
     "githubIntakeEnabled" | "githubIntakeAllowedRepositories" |
-    "ghEnabled" | "kiloEnabled" | "workerEnabled" | "defaultTaskTimeoutMs"
+    "sandboxExecutionEnabled" | "ghEnabled" | "kiloEnabled" | "workerEnabled" | "defaultTaskTimeoutMs"
   > = {
     githubIntakeEnabled: opts.enabled ?? true,
     githubIntakeAllowedRepositories: opts.trusted ?? ["test-owner/test-repo"],
+    sandboxExecutionEnabled: opts.sandboxExecutionEnabled ?? true,
     ghEnabled: opts.ghEnabled ?? true,
     kiloEnabled: opts.kiloEnabled ?? true,
     workerEnabled: opts.workerEnabled ?? false,
@@ -118,6 +120,19 @@ test("GitHub intake: disabled gate causes zero GitHub, database, or dispatcher w
     assert.equal(env.store.listGitHubIntakeClaims().length, 0);
     assert.equal(env.store.listTasksByProject("test-project").length, 0);
   } finally { env.cleanup(); }
+});
+
+test("GitHub intake: Sandbox gate off blocks discovery and dispatch independently of the generic worker gate", async () => {
+  const env = await setup({ sandboxExecutionEnabled: false, workerEnabled: false });
+  try {
+    const result = await env.service.pollOnce();
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "SANDBOX_EXECUTION_DISABLED");
+    assert.equal(env.calls.length, 0);
+    assert.equal(env.dispatches(), 0);
+  } finally {
+    env.cleanup();
+  }
 });
 
 test("GitHub intake: execution backend unavailable fails closed before GitHub access", async () => {
