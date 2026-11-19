@@ -46,6 +46,8 @@ export interface GitHubIntakeOptions {
     "githubIntakeEnabled" | "githubIntakeAllowedRepositories" |
     "ghEnabled" | "kiloEnabled" | "workerEnabled" | "defaultTaskTimeoutMs"
   >;
+  /** Optional live configuration reader. Production wiring uses this so a CLI gate-off is observed by the running poll loop. */
+  getConfig?: () => GitHubIntakeOptions["config"];
   store: SqliteStore;
   registry: ProjectRegistry;
   dispatcher: GitHubIntakeDispatcher;
@@ -124,12 +126,22 @@ export class GitHubIntakeService {
       : new ExclusiveProcessLock(path.join(opts.bridgeRoot, "data", "github-intake.lock"), owner);
   }
 
+  private currentConfig(): GitHubIntakeOptions["config"] {
+    return this.opts.getConfig ? this.opts.getConfig() : this.opts.config;
+  }
+
   getState(): { running: boolean; enabled: boolean; repositories: string[] } {
-    return {
-      running: this.running && !this.stopRequested,
-      enabled: this.opts.config.githubIntakeEnabled,
-      repositories: [...this.opts.config.githubIntakeAllowedRepositories],
-    };
+    try {
+      const config = this.currentConfig();
+      return {
+        running: this.running && !this.stopRequested,
+        enabled: config.githubIntakeEnabled,
+        repositories: [...config.githubIntakeAllowedRepositories],
+      };
+    } catch {
+      // Invalid or unreadable configuration always presents as disabled.
+      return { running: false, enabled: false, repositories: [] };
+    }
   }
 
   async pollOnce(): Promise<BridgeResult<GitHubIntakePollResult>> {
@@ -137,14 +149,20 @@ export class GitHubIntakeService {
       repositoriesChecked: 0, issuesDiscovered: 0, issuesEligible: 0,
       claimsCreated: 0, tasksCreated: 0, executionsStarted: 0, skipped: 0, errors: [],
     });
-    if (this.opts.config.githubIntakeEnabled !== true) {
+    let config: GitHubIntakeOptions["config"];
+    try {
+      config = this.currentConfig();
+    } catch {
+      return failResult("Bridge configuration is unavailable; GitHub intake fails closed", "INTAKE_CONFIG_UNAVAILABLE");
+    }
+    if (config.githubIntakeEnabled !== true) {
       return failResult("dedicated GitHub intake is disabled", "GITHUB_INTAKE_DISABLED");
     }
-    if (this.opts.config.ghEnabled !== true || this.opts.config.kiloEnabled !== true) {
+    if (config.ghEnabled !== true || config.kiloEnabled !== true) {
       return failResult("GitHub and Kilo prerequisites must both be enabled before intake", "INTAKE_PREREQUISITES_DISABLED");
     }
     const trusted = new Set(
-      this.opts.config.githubIntakeAllowedRepositories.map(normalizeRepository).filter((v): v is string => Boolean(v))
+      config.githubIntakeAllowedRepositories.map(normalizeRepository).filter((v): v is string => Boolean(v))
     );
     if (trusted.size === 0) return failResult("no trusted GitHub repositories are configured", "INTAKE_NO_TRUSTED_REPOSITORIES");
 
@@ -242,7 +260,7 @@ export class GitHubIntakeService {
             claimToken: crypto.randomUUID(),
             claimedAt: now,
             updatedAt: now,
-            leaseExpiresAt: new Date(Date.now() + this.opts.config.defaultTaskTimeoutMs + 15 * 60_000).toISOString(),
+            leaseExpiresAt: new Date(Date.now() + config.defaultTaskTimeoutMs + 15 * 60_000).toISOString(),
           };
           if (!this.store.insertGitHubIntakeClaim(claim)) {
             result.skipped += 1;
@@ -291,7 +309,7 @@ export class GitHubIntakeService {
             insertTransition: (transition) => this.store.insertTransition(transition),
             listTasksByStatuses: (statuses) => this.store.listTasksByStatuses(statuses),
           });
-          const claimed = lifecycle.claimTask(taskId, claim.claimOwner, this.opts.config.defaultTaskTimeoutMs + 15 * 60_000);
+          const claimed = lifecycle.claimTask(taskId, claim.claimOwner, config.defaultTaskTimeoutMs + 15 * 60_000);
           if (!claimed.ok) {
             this.store.updateGitHubIntakeClaim(claim.id, {
               taskId, status: "RECONCILIATION_REQUIRED", lastError: claimed.error ?? "task lease claim failed",
@@ -353,8 +371,17 @@ export class GitHubIntakeService {
   }
 
   async startContinuous(intervalMs = 30_000): Promise<BridgeResult<void>> {
-    if (this.opts.config.githubIntakeEnabled !== true) {
+    let config: GitHubIntakeOptions["config"];
+    try {
+      config = this.currentConfig();
+    } catch {
+      return failResult("Bridge configuration is unavailable; GitHub intake cannot start", "INTAKE_CONFIG_UNAVAILABLE");
+    }
+    if (config.githubIntakeEnabled !== true) {
       return failResult("dedicated GitHub intake is disabled", "GITHUB_INTAKE_DISABLED");
+    }
+    if (config.ghEnabled !== true || config.kiloEnabled !== true) {
+      return failResult("GitHub and Kilo prerequisites must both be enabled before intake", "INTAKE_PREREQUISITES_DISABLED");
     }
     if (!(await this.opts.dispatcher.isReady())) {
       return failResult("the isolated execution backend is not ready", "INTAKE_EXECUTION_BACKEND_NOT_READY");
@@ -367,6 +394,27 @@ export class GitHubIntakeService {
     this.stopRequested = false;
     const tick = async () => {
       if (this.stopRequested) return;
+      let current: GitHubIntakeOptions["config"];
+      try {
+        current = this.currentConfig();
+      } catch {
+        current = { ...this.opts.config, githubIntakeEnabled: false };
+      }
+      if (
+        current.githubIntakeEnabled !== true ||
+        current.ghEnabled !== true ||
+        current.kiloEnabled !== true ||
+        current.githubIntakeAllowedRepositories.length === 0
+      ) {
+        this.audit(null, "github_intake.stopped_by_config_gate", {
+          githubIntakeEnabled: current.githubIntakeEnabled,
+          ghEnabled: current.ghEnabled,
+          kiloEnabled: current.kiloEnabled,
+          trustedRepositories: current.githubIntakeAllowedRepositories.length,
+        });
+        this.stop();
+        return;
+      }
       const outcome = await this.pollOnce();
       if (!outcome.ok) {
         // The poll result is deliberately not treated as an execution success.
