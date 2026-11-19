@@ -131,6 +131,29 @@ test("GitHub intake: execution backend unavailable fails closed before GitHub ac
   } finally { env.cleanup(); }
 });
 
+test("GitHub intake: re-reads the live configuration and makes no GitHub calls after the intake gate is disabled", async () => {
+  const env = await setup();
+  try {
+    let runtimeConfig = { ...(env.service as any).opts.config };
+    (env.service as any).opts.getConfig = () => runtimeConfig;
+
+    const first = await env.service.pollOnce();
+    assert.equal(first.ok, true);
+    assert.equal(env.dispatches(), 1);
+
+    const callsBeforeDisable = env.calls.length;
+    runtimeConfig = { ...runtimeConfig, githubIntakeEnabled: false };
+    const disabled = await env.service.pollOnce();
+    assert.equal(disabled.ok, false);
+    assert.equal(disabled.code, "GITHUB_INTAKE_DISABLED");
+    assert.equal(env.calls.length, callsBeforeDisable);
+    assert.equal(env.dispatches(), 1);
+    assert.equal(env.service.getState().enabled, false);
+  } finally {
+    env.cleanup();
+  }
+});
+
 test("GitHub intake: enabled intake works independently of the generic worker gate", async () => {
   const env = await setup({ workerEnabled: false });
   try {
