@@ -1,11 +1,11 @@
 # GitHub Control Center and Isolated Intake — Progress Tracker
 
 **Tracker version:** 2.0  
-**Status:** ATTESTATION WORKFLOW SOURCE + TESTS COMMITTED; CURRENT CI AND REAL GUEST ACCEPTANCE PENDING  
+**Status:** ATTESTATION V2 + PROVIDER CREDENTIAL ROTATION BINDING COMMITTED; WINDOWS CI GREEN; REAL GUEST/BROWSER ACCEPTANCE PENDING  
 **Repository:** nabeel2323/KILO-BRIDGE  
 **Branch:** v1-implementation  
-**Implementation baseline reviewed:** d654e5f18c6e99ce136c613da727915cb21b7b17  
-**CI evidence:** Windows CI run 44431059408  
+**Implementation baseline reviewed:** b652fdeb13e220776add26a0a6225300da7bae87
+**CI evidence:** Windows CI run 44436858231
 **Related Issue:** #1 — GitHub-Centric Control Center and Isolated GitHub Intake  
 **Last updated:** 2026-11-19
 
@@ -22,10 +22,10 @@
 | Generalized Windows Sandbox runner | Implemented with fail-closed checks | Windows CI green | Real guest task not yet verified |
 | Control Center backend/security | Implemented | Windows CI green | Local browser acceptance pending |
 | Control Center settings UI | Implemented | Windows CI green | Local browser acceptance pending |
-| Operator runtime verification/attestation workflow | Implemented in source; real run pending | Regression tests committed; latest CI pending | Blocking until operator-hosted verification succeeds |
-| Documentation synchronization | Updated for attestation workflow | Current docs commit not yet included in verified CI | Operator/browser acceptance pending |
+| Operator runtime verification/attestation workflow | Implemented in source; real operator run pending | Windows CI green — 307 tests, 302 passed, 0 failed, 5 skipped | Blocking until operator-hosted verification succeeds |
+| Documentation synchronization | Operator, architecture, Sandbox, and credential-rotation guidance updated | Included in Windows CI run 44436858231 | Local browser acceptance pending |
 
-The latest verified Windows CI run reports **295 tests, 290 passed, 0 failed, and 5 skipped** on commit `d654e5f18c6e99ce136c613da727915cb21b7b17`. This run predates the attestation service, dispatcher enforcement, staged-gate API/UI, and the newest attestation regression tests. The latest implementation tip checked here is `edc8fe73de570508c1aee563b2348be649af294d`; its commit-status endpoint returned no statuses and the workflow-run endpoint returned no runs. The config-lock, final-revalidation, request-body, and provider-URL redaction changes are source-only until a new Windows CI run confirms them. Do not treat the older 295-test run as verification of the latest source. Skipped checks are environment-dependent and are not counted as runtime passes.
+Windows CI run `44436858231` on commit `b652fdeb13e220776add26a0a6225300da7bae87` passed dependency installation, source/test TypeScript checking, build, and the full test suite: **307 tests, 302 passed, 0 failed, 5 skipped**. This run includes the version-2 HMAC credential-binding implementation and its provider-key rotation regression test. The earlier 295-test run and the first 306-test run are superseded. The post-job cleanup emitted a non-fatal Git submodule warning for `test-fixtures/agent-smoke-test`; the workflow conclusion remained SUCCESS. This is code-level CI evidence only, not proof that a real task has run in the operator's Windows Sandbox guest.
 
 ## 2. Operational safety state
 
@@ -187,11 +187,11 @@ Documentation must distinguish code-level CI proof from guest runtime proof and 
 | 2026-11-19 | `90c39ba`, `d5e0fa1` | Settings API strips provider URL user-info, query tokens, and fragments even if manually inserted into configuration; regression test verifies no URL secrets reach the browser response. | SOURCE + TEST COMMITTED; EXECUTION PENDING |
 | 2026-11-19 | `351443a`, `ade84d4`, `c0205b6` | Updated operator, Sandbox, and architecture docs to explain cross-process intake exclusion and the current release gate. | DOCS COMMITTED; LATEST CI PENDING |
 | 2026-11-19 | `87473f7`, `6d31292`, `1611f01`, `684d465` | Attestation holds the shared config-write lock as well as the intake poll lock; final post-run config/gate/runtime revalidation occurs before signing. Tests cover out-of-band gate mutation and blocked normal config writes during the guest run. | SOURCE + TEST COMMITTED; EXECUTION PENDING |
-| 2026-11-19 | `36c695c`, `39abf9b` | Attestation verify POST consumes bounded JSON and rejects caller-supplied task/runtime parameters. | SOURCE + TEST COMMITTED; EXECUTION PENDING |
-| 2026-11-19 | `90c39ba`, `d5e0fa1` | Settings API strips provider URL user-info, query tokens, and fragments even if manually inserted into config; regression test verifies no URL secrets reach the browser response. | SOURCE + TEST COMMITTED; EXECUTION PENDING |
 | 2026-11-19 | `f2f1522`, `aea26bc`, `42958a9` | Updated operator, Sandbox, and architecture docs to describe config/intake locks and post-run revalidation before signing. | DOCS COMMITTED; LATEST CI PENDING |
-| 2026-11-19 | `f2f1522`, `aea26bc`, `42958a9`, `edc8fe7` | Updated operator, Sandbox, architecture, and tracker docs to describe config/intake locks, post-run revalidation, and current pending validation. | DOCS COMMITTED; LATEST CI PENDING |
 | 2026-11-19 | Windows CI 44431059408 | Dependency install, TypeScript, build, complete test suite. | PASS — 295 total, 290 passed, 0 failed, 5 skipped |
+| 2026-11-19 | `5caf7b0`, `44ae94a`, `2938113` | Attestation format v2 binds the provider API-key value using an HMAC derived from the local signing key; provider credential rotation changes the runtime fingerprint without persisting or displaying the key. Added provider-key rotation regression. | SOURCE + TEST COMMITTED |
+| 2026-11-19 | `fc340a8`, `b652fde` | Updated Control Center and Windows Sandbox operator docs for keyed credential binding, expiry, and retest requirements. | DOCS COMMITTED |
+| 2026-11-19 | Windows CI `44436858231` / commit `b652fde13e220776add26a0a6225300da7bae87` | Dependency installation, TypeScript, build, and complete test suite. | PASS — 307 total, 302 passed, 0 failed, 5 skipped |
 | 2026-11-19 | Operator-hosted Windows Sandbox guest execution | Generalized runner with disposable marker task and signed attestation workflow. | NOT YET RUN — no operator runtime proof |
 | 2026-11-19 | Local browser acceptance | Operator browser walkthrough of Control Center. | NOT YET RUN |
 | 2026-11-19 | Disposable GitHub Issue pilot | End-to-end claim → guest → artifacts → verification → report. | BLOCKED until operator attestation and browser acceptance |
