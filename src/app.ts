@@ -10,6 +10,7 @@ import { GitHubProvider } from "./components/github";
 import { Worker } from "./components/worker";
 import { GitHubIntakeService } from "./components/githubIntake";
 import { SandboxGitHubIntakeDispatcher } from "./components/sandboxGitHubIntakeDispatcher";
+import { SandboxRuntimeAttestationService } from "./components/sandboxRuntimeAttestation";
 import { VerificationEngine } from "./components/verification";
 import { ReportGenerator } from "./components/report";
 import type { ReportData } from "./components/report";
@@ -66,6 +67,7 @@ export class KiloBridgeApp {
   private initialized = false;
   private githubIntakeService: GitHubIntakeService | null = null;
   private githubIntakeConfigFingerprint: string | null = null;
+  private sandboxRuntimeAttestationInstance: SandboxRuntimeAttestationService | null = null;
 
   get store(): SqliteStore { return this.ctx.store; }
   get registry(): ProjectRegistry { return this.ctx.registry; }
@@ -74,6 +76,24 @@ export class KiloBridgeApp {
   get lifecycle(): LifecycleManager { return this._lifecycle; }
 
   private _lifecycle!: LifecycleManager;
+
+  /**
+   * The same signed attestation authority is shared by the Control Center and
+   * the claim-bound dispatcher. A failed/missing/expired/mismatched attestation
+   * therefore blocks intake independently of the browser UI.
+   */
+  sandboxRuntimeAttestation(): SandboxRuntimeAttestationService {
+    if (!this.initialized) throw new Error("Bridge initialization is required before accessing runtime attestation");
+    if (!this.sandboxRuntimeAttestationInstance) {
+      this.sandboxRuntimeAttestationInstance = new SandboxRuntimeAttestationService({
+        bridgeRoot: this.ctx.bridgeRoot,
+        store: this.ctx.store,
+        getConfig: () => ensureBridgeConfig(this.ctx.bridgeRoot),
+        isIntakeRunning: () => Boolean(this.githubIntakeService?.getState().running),
+      });
+    }
+    return this.sandboxRuntimeAttestationInstance;
+  }
 
   async init(bridgeRoot: string): Promise<BridgeResult<void>> {
     const dataDir = path.join(bridgeRoot, "data");
@@ -867,6 +887,7 @@ export class KiloBridgeApp {
         store: this.ctx.store,
         registry: this.ctx.registry,
         logger: this.ctx.logger,
+        isRuntimeAttested: () => this.sandboxRuntimeAttestation().status().valid,
       });
       this.githubIntakeService = new GitHubIntakeService({
         bridgeRoot: this.ctx.bridgeRoot,
@@ -915,6 +936,7 @@ export class KiloBridgeApp {
       store: this.ctx.store,
       registry: this.ctx.registry,
       logger: this.ctx.logger,
+      isRuntimeAttested: () => this.sandboxRuntimeAttestation().status().valid,
     });
     const dispatcherReady = dispatcher.isReady();
     let reason: string | null = null;
