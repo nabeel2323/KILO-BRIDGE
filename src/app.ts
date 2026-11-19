@@ -885,6 +885,7 @@ export class KiloBridgeApp {
           return {
             githubIntakeEnabled: current.githubIntakeEnabled,
             githubIntakeAllowedRepositories: current.githubIntakeAllowedRepositories,
+            sandboxExecutionEnabled: current.sandboxExecutionEnabled,
             ghEnabled: current.ghEnabled,
             kiloEnabled: current.kiloEnabled,
             workerEnabled: current.workerEnabled,
