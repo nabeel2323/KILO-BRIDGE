@@ -72,6 +72,7 @@ The local Control Center exposes the Run one-time Sandbox verification action in
 
 The attestation service:
 - Refuses to start while the generic worker, dedicated intake, or persistent Sandbox execution gate is enabled, or while intake is running.
+- Acquires the same cross-process `data/github-intake.lock` used by the intake poller and holds it through the disposable guest run and cleanup. A different Bridge process cannot poll/dispatch during verification, including between continuous polling ticks.
 - Uses a temporary in-memory config override; it does not persistently change any execution gate.
 - Creates an empty Bridge-owned verification workspace rather than using a registered project or GitHub repository.
 - Runs a UUID/nonce-bound task that asks Kilo's native write tool to create exactly one marker file.
