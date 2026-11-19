@@ -3,6 +3,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { runProcess } from "./process";
 import { SecurityManager } from "./security";
@@ -65,6 +66,26 @@ export interface SandboxTaskRunnerOptions {
   sandboxExePath?: string;
   maxFiles?: number;
   maxBytes?: number;
+}
+
+export interface SandboxRuntimeIdentity {
+  fingerprint: string;
+  kiloExecutableName: string;
+  kiloExecutableSha256: string;
+  kiloVersion: string;
+  sandboxExecutableSha256: string;
+  sandboxVersion: string;
+  providerBaseUrlSha256: string;
+  providerModelId: string;
+  apiKeyEnvironmentName: string;
+  apiKeyPresent: boolean;
+  apiKeyHeader: string;
+  apiKeyPrefixSha256: string;
+  runnerContractSha256: string;
+  operatingSystem: string;
+  operatingSystemRelease: string;
+  nodeVersion: string;
+  architecture: string;
 }
 
 interface StagedFile { relativePath: string; size: number; }
@@ -480,6 +501,80 @@ export class WindowsSandboxTaskRunner {
       if (check.status !== 0) reasons.push("Windows Sandbox feature or interactive desktop session is unavailable");
     }
     return { ready: reasons.length === 0, reasons };
+  }
+
+  /**
+   * Return the current non-secret runtime identity used to bind a local
+   * operator attestation. No executable path or API-key value is returned.
+   */
+  runtimeIdentity(): SandboxRuntimeIdentity {
+    if (process.platform !== "win32") throw new Error("runtime identity is available only on Windows");
+    const kiloExe = this.resolveKiloExe();
+    if (!kiloExe) throw new Error("sandboxKiloExePath must be an existing standalone kilo.exe");
+    const sandboxStat = fs.lstatSync(this.sandboxExe);
+    if (!sandboxStat.isFile() || sandboxStat.isSymbolicLink()) throw new Error("WindowsSandbox.exe is not a regular executable file");
+    const provider = this.providerUrl();
+    if (!provider.ok) throw new Error(provider.error);
+
+    const kiloStat = fs.lstatSync(kiloExe);
+    if (!kiloStat.isFile() || kiloStat.isSymbolicLink()) throw new Error("standalone Kilo executable is not a regular file");
+    const kiloBytes = fs.readFileSync(kiloExe);
+    const sandboxBytes = fs.readFileSync(this.sandboxExe);
+    const kiloVersionResult = spawnSync(kiloExe, ["--version"], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 15_000,
+      env: { ...process.env, KILO_NO_DAEMON: "1" },
+    });
+    if (kiloVersionResult.error || kiloVersionResult.status !== 0) {
+      throw new Error("standalone Kilo executable could not report its version");
+    }
+    const kiloVersion = String(kiloVersionResult.stdout ?? kiloVersionResult.stderr ?? "").trim().slice(0, 120);
+    if (!kiloVersion) throw new Error("standalone Kilo executable returned an empty version");
+
+    const escapedSandboxPath = this.sandboxExe.replace(/'/g, "''");
+    const sandboxVersionResult = spawnSync("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "$v=(Get-Item -LiteralPath '" + escapedSandboxPath + "').VersionInfo; if($v.ProductVersion){$v.ProductVersion}else{$v.FileVersion}",
+    ], { encoding: "utf8", windowsHide: true, timeout: 15_000 });
+    if (sandboxVersionResult.error || sandboxVersionResult.status !== 0) {
+      throw new Error("Windows Sandbox executable version could not be inspected");
+    }
+    const sandboxVersion = String(sandboxVersionResult.stdout ?? "").trim().slice(0, 120);
+    if (!sandboxVersion) throw new Error("Windows Sandbox executable returned an empty version");
+
+    let runnerBytes: Buffer;
+    try {
+      runnerBytes = fs.readFileSync(__filename);
+    } catch {
+      throw new Error("the active Windows Sandbox runner contract could not be hashed");
+    }
+    const apiKeyEnvironmentName = this.config.sandboxProviderApiKeyEnv;
+    const apiKeyPresent = Boolean(apiKeyEnvironmentName && process.env[apiKeyEnvironmentName]);
+    const identity = {
+      kiloExecutableName: path.basename(kiloExe),
+      kiloExecutableSha256: digest(kiloBytes),
+      kiloVersion,
+      sandboxExecutableSha256: digest(sandboxBytes),
+      sandboxVersion,
+      providerBaseUrlSha256: digest(provider.data.href),
+      providerModelId: this.config.sandboxProviderModelId,
+      apiKeyEnvironmentName,
+      apiKeyPresent,
+      apiKeyHeader: this.config.sandboxProviderApiKeyHeader,
+      apiKeyPrefixSha256: digest(this.config.sandboxProviderApiKeyPrefix),
+      runnerContractSha256: digest(runnerBytes),
+      operatingSystem: process.platform,
+      operatingSystemRelease: os.release(),
+      nodeVersion: process.version,
+      architecture: process.arch,
+    };
+    return {
+      ...identity,
+      fingerprint: digest(JSON.stringify(identity)),
+    };
   }
 
   async run(
