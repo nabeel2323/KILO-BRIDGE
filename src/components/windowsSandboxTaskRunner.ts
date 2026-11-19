@@ -266,10 +266,30 @@ export function buildGuestBootstrap(): string {
 }
 
 export function buildWsb(inbox: string, outbox: string, bootstrap: string, executionId: string, timeoutMs: number): string {
-  const xml = (value: string): string => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
-  const command = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + xml(bootstrap) + "\" " +
-    "-InBox \"" + xml(GUEST_INBOX) + "\" -OutBox \"" + xml(GUEST_OUTBOX) + "\" -WorkDir \"" + xml(GUEST_WORK) + "\" " +
-    "-ExecutionId \"" + xml(executionId) + "\" -TimeoutMs " + String(timeoutMs);
+  const xml = (value: string): string => value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+  if (path.win32.basename(bootstrap).toLowerCase() !== "bootstrap.ps1") {
+    throw new Error("Sandbox bootstrap file must be named bootstrap.ps1");
+  }
+  if (!/^[0-9a-f-]{36}$/i.test(executionId)) {
+    throw new Error("Sandbox execution id must be a UUID");
+  }
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new Error("Sandbox timeout must be a positive integer");
+  }
+
+  // LogonCommand executes inside the guest. The host bootstrap path is not
+  // visible there; the read-only inbox mapping is the only valid guest path.
+  const guestBootstrap = path.win32.join(GUEST_INBOX, "bootstrap.ps1");
+  const command =
+    "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + guestBootstrap + "\" " +
+    "-InBox \"" + GUEST_INBOX + "\" -OutBox \"" + GUEST_OUTBOX + "\" -WorkDir \"" + GUEST_WORK + "\" " +
+    "-ExecutionId \"" + executionId + "\" -TimeoutMs " + String(timeoutMs);
+
   return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Configuration>\n" +
     "  <Networking>Disable</Networking>\n" +
     "  <ClipboardRedirection>Disable</ClipboardRedirection><PrinterRedirection>Disable</PrinterRedirection>\n" +
