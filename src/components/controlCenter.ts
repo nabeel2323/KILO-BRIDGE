@@ -913,9 +913,9 @@ export class ControlCenterServer {
       }
       if (body.githubIntakeEnabled === true) {
         const current = ensureBridgeConfig(this.bridgeRoot);
-        if (body.sandboxExecutionEnabled === true || !current.sandboxExecutionEnabled) {
+        if (body.sandboxExecutionEnabled === true || body.sandboxExecutionEnabled === false || !current.sandboxExecutionEnabled) {
           this.sendJson(response, 409, {
-            error: "Enable Windows Sandbox execution first; dedicated GitHub intake is a separate second gate.",
+            error: "Windows Sandbox execution must already be enabled and cannot be disabled in the same request that enables GitHub intake.",
             code: "SANDBOX_GATE_MUST_ALREADY_BE_ENABLED",
           });
           return;
@@ -946,9 +946,12 @@ export class ControlCenterServer {
         }
       }
     }
-    if (body.sandboxExecutionEnabled === false && !("githubIntakeEnabled" in body)) {
+    if (body.sandboxExecutionEnabled === false) {
       const current = ensureBridgeConfig(this.bridgeRoot);
-      if (current.githubIntakeEnabled) {
+      const intakeWillRemainEnabled = "githubIntakeEnabled" in body
+        ? body.githubIntakeEnabled === true
+        : current.githubIntakeEnabled;
+      if (intakeWillRemainEnabled) {
         this.sendJson(response, 409, {
           error: "Disable dedicated GitHub intake before disabling the Sandbox execution gate.",
           code: "INTAKE_GATE_MUST_BE_DISABLED_FIRST",
