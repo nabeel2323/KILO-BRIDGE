@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { SqliteStore } from "../src/db";
-import { ensureBridgeConfig } from "../src/config";
+import { ensureBridgeConfig, updateBridgeConfig } from "../src/config";
 import { ProjectRegistry } from "../src/components/registry";
 import { ControlCenterServer, createControlCenterSetupToken } from "../src/components/controlCenter";
 import { makeTempDir, removeDir, makeProjectConfig, makeTaskRecord } from "./helpers/fixtures";
@@ -533,6 +533,157 @@ test("control center: intake status fails closed when lifecycle callbacks are no
       body: "{}",
     });
     assert.equal(start.status, 503);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+
+test("control center: runtime attestation endpoint is session and CSRF protected", async () => {
+  let verificationStarts = 0;
+  let status = {
+    state: "NOT_ATTESTED",
+    valid: false,
+    reason: "No successful Sandbox runtime attestation has been recorded.",
+  };
+  const fakeAttestation = {
+    status: () => status,
+    startVerification: () => {
+      verificationStarts++;
+      status = { state: "RUNNING", valid: false, reason: "Verification running." };
+      return { ok: true, status };
+    },
+  };
+  const env = await setupAuthenticatedServer({ sandboxAttestation: fakeAttestation });
+  try {
+    const unauthenticated = await fetch(env.baseUrl + "api/sandbox/attestation");
+    assert.equal(unauthenticated.status, 401);
+
+    const origin = new URL(env.baseUrl).origin;
+    const noCsrf = await fetch(env.baseUrl + "api/sandbox/attestation/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: origin, Cookie: env.cookie },
+      body: "{}",
+    });
+    assert.equal(noCsrf.status, 403);
+    assert.equal(verificationStarts, 0);
+
+    const start = await fetch(env.baseUrl + "api/sandbox/attestation/verify", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: origin,
+        Cookie: env.cookie,
+        "X-CSRF-Token": env.csrfToken,
+      },
+      body: "{}",
+    });
+    assert.equal(start.status, 202);
+    assert.equal(verificationStarts, 1);
+    const started = await start.json() as any;
+    assert.equal(started.status.state, "RUNNING");
+    assert.ok(env.store.listAudit().some((event) => event.action === "control_center.sandbox_runtime_verification_started"));
+
+    status = {
+      state: "VALID",
+      valid: true,
+      reason: null,
+      verifiedTool: "write",
+      providerRequests: 2,
+    };
+    const read = await fetch(env.baseUrl + "api/sandbox/attestation", {
+      headers: { Cookie: env.cookie },
+    });
+    assert.equal(read.status, 200);
+    const result = await read.json() as any;
+    assert.equal(result.valid, true);
+    assert.equal(result.verifiedTool, "write");
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("control center: activation requires valid attestation and proceeds Sandbox first, then intake", async () => {
+  let attestationValid = false;
+  let intakeRunning = false;
+  const fakeAttestation = {
+    status: () => ({
+      state: attestationValid ? "VALID" : "NOT_ATTESTED",
+      valid: attestationValid,
+      reason: attestationValid ? null : "A current Windows Sandbox runtime attestation is required.",
+    }),
+    startVerification: () => ({
+      ok: false,
+      error: "A real Windows Sandbox guest is not available in this test.",
+      code: "SANDBOX_NOT_READY",
+      status: { state: "NOT_ATTESTED", valid: false, reason: "not ready" },
+    }),
+  };
+  const env = await setupAuthenticatedServer({
+    sandboxAttestation: fakeAttestation,
+    intakeStatus: () => ({
+      enabled: false,
+      running: intakeRunning,
+      dispatcherReady: true,
+      repositories: ["test-owner/control-center-test"],
+      reason: null,
+    }),
+  });
+  try {
+    updateBridgeConfig(env.root, (current) => ({
+      ...current,
+      ghEnabled: true,
+      kiloEnabled: true,
+      githubIntakeAllowedRepositories: ["test-owner/control-center-test"],
+      workerEnabled: false,
+      githubIntakeEnabled: false,
+      sandboxExecutionEnabled: false,
+    }));
+
+    const origin = new URL(env.baseUrl).origin;
+    const headers = {
+      "Content-Type": "application/json",
+      Origin: origin,
+      Cookie: env.cookie,
+      "X-CSRF-Token": env.csrfToken,
+    };
+    const post = async (body: Record<string, unknown>) => fetch(env.baseUrl + "api/settings", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    const blocked = await post({ sandboxExecutionEnabled: true });
+    assert.equal(blocked.status, 409);
+    assert.equal((await blocked.json() as any).code, "SANDBOX_ATTESTATION_REQUIRED");
+    assert.equal(ensureBridgeConfig(env.root).sandboxExecutionEnabled, false);
+
+    attestationValid = true;
+    const sandbox = await post({ sandboxExecutionEnabled: true });
+    assert.equal(sandbox.status, 200);
+    assert.equal(ensureBridgeConfig(env.root).sandboxExecutionEnabled, true);
+    assert.equal(ensureBridgeConfig(env.root).githubIntakeEnabled, false);
+
+    const sameRequest = await post({ sandboxExecutionEnabled: true, githubIntakeEnabled: true });
+    assert.equal(sameRequest.status, 409);
+    assert.equal((await sameRequest.json() as any).code, "SANDBOX_GATE_MUST_ALREADY_BE_ENABLED");
+
+    const intake = await post({ githubIntakeEnabled: true });
+    assert.equal(intake.status, 200);
+    assert.equal(ensureBridgeConfig(env.root).githubIntakeEnabled, true);
+
+    const genericWorker = await post({ workerEnabled: true });
+    assert.equal(genericWorker.status, 409);
+    assert.equal(ensureBridgeConfig(env.root).workerEnabled, false);
+
+    const disableSandboxFirst = await post({ sandboxExecutionEnabled: false });
+    assert.equal(disableSandboxFirst.status, 409);
+
+    const disableBoth = await post({ githubIntakeEnabled: false, sandboxExecutionEnabled: false });
+    assert.equal(disableBoth.status, 200);
+    assert.equal(ensureBridgeConfig(env.root).githubIntakeEnabled, false);
+    assert.equal(ensureBridgeConfig(env.root).sandboxExecutionEnabled, false);
+    assert.equal(ensureBridgeConfig(env.root).workerEnabled, false);
   } finally {
     await env.cleanup();
   }
